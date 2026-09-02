@@ -52,7 +52,16 @@ func (m *Manager) Launch() (*rod.Page, error) {
 		Set("disable-extensions").
 		Set("disable-dev-shm-usage").
 		Set("no-sandbox").
-		Set("disable-gpu")
+		Set("disable-gpu").
+		Set("disable-features", "AsyncDns,DnsOverHttps").
+		Set("dns-prefetch-disable")
+
+	// Host resolver rules from entrypoint pre-resolve (17 domains) — avoids Chrome DNS in Docker
+	if data, err := os.ReadFile("/tmp/host_resolver_rules"); err == nil && len(data) > 0 {
+		rules := string(data)
+		args = args.Set("host-resolver-rules", rules)
+		log.Infof("Applied host-resolver-rules: %d chars", len(rules))
+	}
 
 	if m.cfg.Headless {
 		args = args.Headless(true)
@@ -159,14 +168,58 @@ func (m *Manager) Close() error {
 	return nil
 }
 
-// cleanLockFiles removes stale Chrome singleton lock files.
+// cleanLockFiles removes stale Chrome locks + SQLite WAL/journal + network cache (ref hardening).
 func (m *Manager) cleanLockFiles() {
-	patterns := []string{"SingletonLock", "SingletonSocket", "SingletonCookie"}
-	for _, name := range patterns {
-		lockPath := filepath.Join(m.cfg.BrowserDataPath(), name)
+	dir := m.cfg.BrowserDataPath()
+	// 1. Singleton locks
+	for _, name := range []string{"SingletonLock", "SingletonSocket", "SingletonCookie"} {
+		lockPath := filepath.Join(dir, name)
 		if _, err := os.Stat(lockPath); err == nil {
 			log.Infof("Removing stale lock file: %s", lockPath)
 			_ = os.Remove(lockPath)
+		}
+	}
+	// 2. SQLite journal/WAL/SHM that cause "database is locked"
+	patterns := []string{"*-journal", "*-wal", "*-shm"}
+	removed := 0
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		for _, pat := range patterns {
+			if matched, _ := filepath.Match(pat, filepath.Base(path)); matched {
+				_ = os.Remove(path)
+				removed++
+				break
+			}
+		}
+		return nil
+	})
+	if removed > 0 {
+		log.Infof("Removed %d stale SQLite journal/WAL/SHM files", removed)
+	}
+	// 3. Network state that poisons DNS (ref manager.py 4a)
+	for _, rel := range []string{
+		"Default/Network Persistent State",
+		"Default/Network Action Predictor",
+		"Default/TransportSecurity",
+		"Default/Reporting and NEL",
+	} {
+		p := filepath.Join(dir, rel)
+		if _, err := os.Stat(p); err == nil {
+			_ = os.Remove(p)
+			log.Infof("Cleared network state: %s", rel)
+		}
+	}
+	// 4. Cache dirs that bloat and hold stale DNS
+	for _, rel := range []string{"Default/Cache", "Default/Code Cache", "Default/GPUCache", "GrShaderCache", "GraphiteDawnCache", "ShaderCache"} {
+		p := filepath.Join(dir, rel)
+		if _, err := os.Stat(p); err == nil {
+			_ = os.RemoveAll(p)
+			log.Infof("Cleared cache dir: %s", rel)
 		}
 	}
 }

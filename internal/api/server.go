@@ -9,12 +9,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-rod/rod"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/logging"
 	"github.com/chimera/chimera/internal/models"
 	"github.com/chimera/chimera/internal/providers"
+	"github.com/chimera/chimera/internal/session"
 	"github.com/chimera/chimera/internal/tools"
 	"golang.org/x/time/rate"
 )
@@ -22,20 +24,27 @@ import (
 var log_ = logging.New("api", "./logs", "debug", true)
 
 // Server holds the HTTP server and dependencies.
+// Supports both single-provider and pooled (single Chromium, page-per-provider) modes.
 type Server struct {
-	cfg      *config.Config
-	router   *chi.Mux
-	provider providers.Provider
-	limiter  *rate.Limiter
-	mu       sync.Mutex // serializes browser access (single page = no concurrent DOM writes)
+	cfg        *config.Config
+	router     *chi.Mux
+	provider   providers.Provider             // single-provider mode (legacy)
+	providers  map[string]providers.Provider // pooled mode: provider name -> Provider
+	mus        map[string]*sync.Mutex        // pooled mode: per-provider mutex
+	sessionMgr *session.Manager               // X-Session-Id continuity
+	browser    *rod.Browser                   // for session pages
+	limiter    *rate.Limiter
+	mu         sync.Mutex // serializes browser access for single mode
 }
 
-// NewServer creates a new API server.
+// NewServer creates a new API server for single provider.
 func NewServer(cfg *config.Config, provider providers.Provider) *Server {
 	s := &Server{
-		cfg:      cfg,
-		provider: provider,
-		limiter:  rate.NewLimiter(rate.Limit(1.0/float64(cfg.RateLimitSeconds)), 1),
+		cfg:       cfg,
+		provider:  provider,
+		providers: map[string]providers.Provider{provider.Name(): provider},
+		mus:       map[string]*sync.Mutex{provider.Name(): &sync.Mutex{}},
+		limiter:   rate.NewLimiter(rate.Limit(1.0/float64(cfg.RateLimitSeconds)), 1),
 	}
 
 	s.router = chi.NewRouter()
@@ -43,6 +52,67 @@ func NewServer(cfg *config.Config, provider providers.Provider) *Server {
 	s.setupRoutes()
 
 	return s
+}
+
+// NewPooledServer creates a pooled server that routes by model to the correct provider.
+// poolProviders is map from provider name to Provider, mus is per-provider mutex from browser.Pool.
+func NewPooledServer(cfg *config.Config, poolProviders map[string]providers.Provider, poolMus map[string]*sync.Mutex, browser *rod.Browser) *Server {
+	s := &Server{
+		cfg:        cfg,
+		providers:  poolProviders,
+		mus:        poolMus,
+		browser:    browser,
+		limiter:    rate.NewLimiter(rate.Limit(1.0/float64(cfg.RateLimitSeconds)), 1),
+		sessionMgr: session.New(browser, 10),
+	}
+	// Set default single provider for fallback (prefer chatgpt if present)
+	if p, ok := poolProviders[config.ProviderChatGPT]; ok {
+		s.provider = p
+	} else {
+		for _, p := range poolProviders {
+			s.provider = p
+			break
+		}
+	}
+
+	s.router = chi.NewRouter()
+	s.setupMiddleware()
+	s.setupRoutes()
+
+	return s
+}
+
+// providerForModel resolves a model ID to a provider and its mutex.
+// Supports "chimera-chatgpt", "chimera-qwen", "chatgpt", etc. Falls back to default.
+func (s *Server) providerForModel(model string) (providers.Provider, *sync.Mutex, string) {
+	// Direct match on ModelID
+	for _, p := range s.providers {
+		if p.ModelID() == model {
+			name := p.Name()
+			return p, s.mus[name], name
+		}
+	}
+	// Match by provider name contained in model
+	lower := strings.ToLower(model)
+	for name, p := range s.providers {
+		if strings.Contains(lower, name) {
+			return p, s.mus[name], name
+		}
+	}
+	// Fallback to single/default
+	if s.provider != nil {
+		name := s.provider.Name()
+		mu := s.mus[name]
+		if mu == nil {
+			mu = &s.mu
+		}
+		return s.provider, mu, name
+	}
+	// Last resort: first pooled
+	for name, p := range s.providers {
+		return p, s.mus[name], name
+	}
+	return nil, &s.mu, ""
 }
 
 // setupMiddleware configures HTTP middleware.
@@ -66,13 +136,27 @@ func (s *Server) setupRoutes() {
 	// Root status
 	s.router.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		providerInfo := s.cfg.Provider
+		if s.isPooled() {
+			providerInfo = "pool:" + strings.Join(s.providerNames(), ",")
+		}
 		json.NewEncoder(w).Encode(map[string]string{
-			"name":    "Chimera Gateway",
-			"version": "0.1.0",
-			"status":  "running",
-			"provider": s.cfg.Provider,
+			"name":     "Chimera Gateway",
+			"version":  "0.1.0",
+			"status":   "running",
+			"provider": providerInfo,
 		})
 	})
+}
+
+func (s *Server) isPooled() bool { return len(s.providers) > 1 }
+
+func (s *Server) providerNames() []string {
+	names := make([]string, 0, len(s.providers))
+	for k := range s.providers {
+		names = append(names, k)
+	}
+	return names
 }
 
 // authMiddleware validates Bearer token if configured.
@@ -126,15 +210,27 @@ func (s *Server) Router() http.Handler {
 
 // handleListModels returns available models.
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
-	resp := models.ModelList{
-		Object: "list",
-		Data: []models.ModelObject{
+	var data []models.ModelObject
+	if s.isPooled() {
+		for _, p := range s.providers {
+			data = append(data, models.ModelObject{
+				ID:      p.ModelID(),
+				Object:  "model",
+				OwnedBy: p.Name(),
+			})
+		}
+	} else {
+		data = []models.ModelObject{
 			{
 				ID:      s.provider.ModelID(),
 				Object:  "model",
 				OwnedBy: s.provider.Name(),
 			},
-		},
+		}
+	}
+	resp := models.ModelList{
+		Object: "list",
+		Data:   data,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -165,24 +261,60 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build conversation context
-	threadID := extractThreadID(req.Messages)
-	prompt := buildPrompt(req.Messages, req.Tools, s.cfg.Provider)
+	// Resolve provider by model (pooled routing)
+	provider, mu, providerName := s.providerForModel(req.Model)
+	if provider == nil {
+		http.Error(w, `{"error":"no provider available for model `+req.Model+`"}`, http.StatusBadRequest)
+		return
+	}
+	if mu == nil {
+		mu = &s.mu
+	}
 
-	// Handle streaming
-	if req.Stream {
-		s.handleStreamingCompletion(w, r, prompt, threadID, req)
+	// Build conversation context with correct provider name for tool prompts
+	threadID := extractThreadID(req.Messages)
+	promptProvider := providerName
+	if promptProvider == "" {
+		promptProvider = s.cfg.Provider
+	}
+	prompt := buildPrompt(req.Messages, req.Tools, promptProvider)
+
+	// Session continuity: X-Session-Id / X-Thread-Id header or req.User
+	sessionID := extractSessionID(r, req.User)
+	if sessionID != "" {
+		log_.Infof("Persistent session %s for provider %s (pruning history to avoid duplication)", sessionID, providerName)
+		// Prune to latest turn if not first turn (browser already has history)
+		if len(req.Messages) > 2 {
+			if pruned := buildPrunedPrompt(req.Messages, req.Tools, providerName); pruned != "" {
+				prompt = pruned
+				log_.Infof("Pruned prompt for session %s: %d -> %d chars", sessionID, len(buildPrompt(req.Messages, req.Tools, promptProvider)), len(prompt))
+			}
+		}
+		// Save session URL after successful response (handled below)
+		threadID = sessionID // use sessionID as threadID for provider
+	}
+
+	// Pre-flight: message too long → fast 400 instead of 2m hang (upstream #17)
+	if len(prompt) > 12000 {
+		log_.Warnf("Pre-flight reject: prompt %d chars exceeds 12000", len(prompt))
+		http.Error(w, `{"error":{"type":"message_too_long","message":"Prompt exceeds 12000 chars, send button will be disabled. Split or shorten."}}`, http.StatusBadRequest)
 		return
 	}
 
-	// Non-streaming — serialize browser access
-	s.mu.Lock()
+	// Handle streaming
+	if req.Stream {
+		s.handleStreamingCompletionWithProvider(w, r, prompt, threadID, req, provider, mu)
+		return
+	}
+
+	// Non-streaming — per-provider serialized
+	mu.Lock()
 	start := time.Now()
-	resp, err := s.provider.SendMessage(prompt, threadID)
-	s.mu.Unlock()
+	resp, err := provider.SendMessage(prompt, threadID)
+	mu.Unlock()
 	_ = start
 	if err != nil {
-		log_.Errorf("Provider error: %v", err)
+		log_.Errorf("Provider %s error: %v", providerName, err)
 		http.Error(w, fmt.Sprintf(`{"error":"provider error: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
@@ -197,7 +329,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		ID:      models.NewResponseID(),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
-		Model:   s.provider.ModelID(),
+		Model:   provider.ModelID(),
 		Choices: []models.Choice{
 			{
 				Index: 0,
@@ -323,6 +455,84 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 	flusher.Flush()
 }
 
+// handleStreamingCompletionWithProvider is the pooled-aware streaming path (per-provider mutex and model).
+func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r *http.Request, prompt, threadID string, req models.ChatCompletionRequest, provider providers.Provider, mu *sync.Mutex) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	respID := models.NewResponseID()
+	created := time.Now().Unix()
+
+	initialChunk := models.ChatCompletionChunk{
+		ID:      respID,
+		Object:  "chat.completion.chunk",
+		Created: created,
+		Model:   provider.ModelID(),
+		Choices: []models.ChunkChoice{{Index: 0, Delta: models.DeltaMsg{Role: "assistant"}}},
+	}
+	sendSSE(w, initialChunk)
+	flusher.Flush()
+
+	if mu == nil {
+		mu = &s.mu
+	}
+	mu.Lock()
+	providerResp, err := provider.SendMessage(prompt, threadID)
+	mu.Unlock()
+	if err != nil {
+		log_.Errorf("Provider %s streaming error: %v", provider.Name(), err)
+		errorChunk := models.ChatCompletionChunk{
+			ID:      respID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   provider.ModelID(),
+			Choices: []models.ChunkChoice{{Index: 0, Delta: models.DeltaMsg{Content: fmt.Sprintf("Error: %v", err)}, FinishReason: "stop"}},
+		}
+		sendSSE(w, errorChunk)
+		flusher.Flush()
+		return
+	}
+
+	text := providerResp.Message
+	chunkSize := 20
+	for i := 0; i < len(text); i += chunkSize {
+		end := i + chunkSize
+		if end > len(text) {
+			end = len(text)
+		}
+		chunk := models.ChatCompletionChunk{
+			ID:      respID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   provider.ModelID(),
+			Choices: []models.ChunkChoice{{Index: 0, Delta: models.DeltaMsg{Content: text[i:end]}}},
+		}
+		sendSSE(w, chunk)
+		flusher.Flush()
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	finalChunk := models.ChatCompletionChunk{
+		ID:      respID,
+		Object:  "chat.completion.chunk",
+		Created: created,
+		Model:   provider.ModelID(),
+		Choices: []models.ChunkChoice{{Index: 0, FinishReason: "stop"}},
+	}
+	sendSSE(w, finalChunk)
+	flusher.Flush()
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
 // sendSSE writes a single SSE event.
 func sendSSE(w http.ResponseWriter, data interface{}) {
 	jsonBytes, _ := json.Marshal(data)
@@ -407,6 +617,54 @@ func trimNonJSON(text string) string {
 		return text[start : end+1]
 	}
 	return text
+}
+
+// extractSessionID pulls X-Session-Id / Session-Id / X-Thread-Id from headers or req.User.
+func extractSessionID(r *http.Request, userField string) string {
+	for _, k := range []string{"X-Session-Id", "Session-Id", "X-Thread-Id", "Thread-Id", "x-session-id", "session-id"} {
+		if v := r.Header.Get(k); v != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	if strings.TrimSpace(userField) != "" {
+		return strings.TrimSpace(userField)
+	}
+	return ""
+}
+
+// buildPrunedPrompt for persistent sessions: only latest user + associated tool results.
+func buildPrunedPrompt(messages []models.ChatMessage, toolDefs []models.Tool, provider string) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	// If single user message, keep as is (first turn)
+	nonSystem := 0
+	for _, m := range messages {
+		if m.Role != "system" {
+			nonSystem++
+		}
+	}
+	if nonSystem <= 1 {
+		return buildPrompt(messages, toolDefs, provider)
+	}
+	// Subsequent turns: take latest user and trailing tool messages
+	var pruned []models.ChatMessage
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			// include this user and any following tool messages (already collected)
+			pruned = append([]models.ChatMessage{messages[i]}, pruned...)
+			break
+		}
+		if messages[i].Role == "tool" {
+			pruned = append([]models.ChatMessage{messages[i]}, pruned...)
+		}
+	}
+	if len(pruned) == 0 {
+		pruned = []models.ChatMessage{messages[len(messages)-1]}
+	}
+	// Prepend system if present and first turn? For pruned we keep system only if first turn, else drop to avoid duplication.
+	// Keep system only if messages has system and pruned is first turn equivalent
+	return buildPrompt(pruned, toolDefs, provider)
 }
 
 // determineFinishReason returns the appropriate finish reason.

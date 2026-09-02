@@ -72,7 +72,7 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 	}
 	time.Sleep(200 * time.Millisecond)
 
-	if err := c.Page.InsertText(text); err != nil {
+	if err := c.Human.InsertText(text); err != nil {
 		return nil, fmt.Errorf("typing message: %w", err)
 	}
 
@@ -91,6 +91,12 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 
 	// Claude uses a different streaming detection mechanism
 	// Wait for the streaming indicator to appear and disappear
+	if c.IsSendDisabled(SendButton) {
+		if msg, ok := c.HasErrorBanner(); ok {
+			return nil, fmt.Errorf("send disabled: %s", msg)
+		}
+		return nil, fmt.Errorf("send button disabled (message too long or rate limited)")
+	}
 	if err := c.WaitForStreaming(); err != nil {
 		c.Log.Warnf("Streaming detection failed: %v", err)
 	}
