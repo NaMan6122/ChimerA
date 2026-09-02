@@ -79,7 +79,7 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 	time.Sleep(200 * time.Millisecond)
 
 	// Use InsertText (paste-like) for contenteditable divs
-	if err := c.Page.InsertText(text); err != nil {
+	if err := c.Human.InsertText(text); err != nil {
 		return nil, fmt.Errorf("typing message: %w", err)
 	}
 
@@ -101,6 +101,13 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 
 	// Wait for response
 	stopSelectors := StopButton
+	// Early disabled/error check (upstream #17)
+	if c.IsSendDisabled(SendButton) {
+		if msg, ok := c.HasErrorBanner(); ok {
+			return nil, fmt.Errorf("send disabled: %s", msg)
+		}
+		return nil, fmt.Errorf("send button disabled (message too long or rate limited)")
+	}
 	if err := c.WaitForResponse(stopSelectors); err != nil {
 		// Try copy button detection as fallback
 		c.Log.Warnf("Stop button detection failed, trying copy button: %v", err)

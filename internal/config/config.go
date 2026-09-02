@@ -18,6 +18,8 @@ const (
 	ProviderClaude   = "claude"
 	ProviderQwen     = "qwen"
 	ProviderDeepSeek = "deepseek"
+	ProviderKimi     = "kimi"
+	ProviderAll      = "all"
 )
 
 // SupportedProviders lists all available providers.
@@ -26,6 +28,8 @@ var SupportedProviders = []string{
 	ProviderClaude,
 	ProviderQwen,
 	ProviderDeepSeek,
+	ProviderKimi,
+	ProviderAll,
 }
 
 // Config holds all project settings.
@@ -39,10 +43,11 @@ type Config struct {
 	SlowMo         time.Duration
 
 	// Provider URLs
-	ChatGPTURL string
-	ClaudeURL  string
-	QwenURL    string
+	ChatGPTURL  string
+	ClaudeURL   string
+	QwenURL     string
 	DeepSeekURL string
+	KimiURL     string
 
 	// Timeouts
 	ResponseTimeout time.Duration
@@ -95,6 +100,7 @@ func Load() (*Config, error) {
 		ClaudeURL:   getEnvStr("CLAUDE_URL", "https://claude.ai"),
 		QwenURL:     getEnvStr("QWEN_URL", "https://chat.qwen.ai"),
 		DeepSeekURL: getEnvStr("DEEPSEEK_URL", "https://chat.deepseek.com"),
+		KimiURL:     getEnvStr("KIMI_URL", "https://www.kimi.com"),
 
 		// Timeouts
 		ResponseTimeout: time.Duration(getEnvInt("RESPONSE_TIMEOUT", 120000)) * time.Millisecond,
@@ -155,9 +161,35 @@ func (c *Config) ProviderURL() string {
 		return c.QwenURL
 	case ProviderDeepSeek:
 		return c.DeepSeekURL
+	case ProviderKimi:
+		return c.KimiURL
 	default:
 		return c.ChatGPTURL
 	}
+}
+
+// ProviderURLs returns map of provider->URL for pooled mode.
+func (c *Config) ProviderURLs() map[string]string {
+	return map[string]string{
+		ProviderChatGPT:  c.ChatGPTURL,
+		ProviderClaude:   c.ClaudeURL,
+		ProviderQwen:     c.QwenURL,
+		ProviderDeepSeek: c.DeepSeekURL,
+		ProviderKimi:     c.KimiURL,
+	}
+}
+
+// IsPooled returns true if Provider is "all" (single Chromium with page per provider).
+func (c *Config) IsPooled() bool { return c.Provider == ProviderAll }
+
+// PooledProviders returns the list of providers to launch in pooled mode.
+// For now, only the 3 verified providers (chatgpt,qwen,deepseek) to avoid 5× login wait.
+// Extend to include claude/kimi once their selectors are verified live.
+func (c *Config) PooledProviders() []string {
+	if c.IsPooled() {
+		return []string{ProviderChatGPT, ProviderQwen, ProviderDeepSeek}
+	}
+	return []string{c.Provider}
 }
 
 // EnsureDirs creates required directories if they don't exist.
@@ -173,6 +205,11 @@ func (c *Config) EnsureDirs() error {
 // BrowserDataPath returns the provider-specific browser data directory.
 func (c *Config) BrowserDataPath() string {
 	return filepath.Join(c.BrowserDataDir, c.Provider)
+}
+
+// PoolBrowserDataPath returns the shared pool directory for single-Chromium mode.
+func (c *Config) PoolBrowserDataPath() string {
+	return filepath.Join(c.BrowserDataDir, "pool")
 }
 
 // ── helpers ──────────────────────────────────────────────────

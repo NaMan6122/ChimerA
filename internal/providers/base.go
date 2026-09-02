@@ -60,6 +60,7 @@ func (b *Base) FindElementExists(selectors []string, timeout time.Duration) *rod
 }
 
 // WaitForResponse waits for the response to complete by monitoring the stop button.
+// Includes early exit for error banners (e.g., "message too long") to avoid 2m hang.
 func (b *Base) WaitForResponse(stopSelectors []string) error {
 	b.Log.Debugf("Waiting for response (timeout=%v)", b.Cfg.ResponseTimeout)
 
@@ -67,6 +68,9 @@ func (b *Base) WaitForResponse(stopSelectors []string) error {
 
 	// Phase 1: Wait for stop button to appear (streaming started)
 	for time.Now().Before(deadline) {
+		if msg, ok := b.HasErrorBanner(); ok {
+			return fmt.Errorf("provider error banner: %s", msg)
+		}
 		el := b.FindElementExists(stopSelectors, 500*time.Millisecond)
 		if el != nil {
 			b.Log.Debugf("Response streaming detected (stop button found)")
@@ -77,6 +81,9 @@ func (b *Base) WaitForResponse(stopSelectors []string) error {
 
 	// Phase 2: Wait for stop button to disappear (streaming finished)
 	for time.Now().Before(deadline) {
+		if msg, ok := b.HasErrorBanner(); ok {
+			return fmt.Errorf("provider error banner: %s", msg)
+		}
 		el := b.FindElementExists(stopSelectors, 500*time.Millisecond)
 		if el == nil {
 			b.Log.Debugf("Response complete (stop button gone)")
@@ -87,6 +94,64 @@ func (b *Base) WaitForResponse(stopSelectors []string) error {
 	}
 
 	return fmt.Errorf("response timeout after %v", b.Cfg.ResponseTimeout)
+}
+
+// HasErrorBanner checks for provider error banners like "message too long".
+func (b *Base) HasErrorBanner() (string, bool) {
+	res, err := b.Page.Eval(`() => {
+		const text = document.body ? document.body.innerText : '';
+		const markers = [
+			'message too long',
+			'attachment too large',
+			'something went wrong',
+			'try again',
+			'rate limit',
+			'too many requests',
+			'error generating'
+		];
+		const lower = text.toLowerCase();
+		for (const m of markers) {
+			if (lower.includes(m)) {
+				// Return snippet around marker
+				const idx = lower.indexOf(m);
+				return text.slice(Math.max(0, idx-40), idx+80);
+			}
+		}
+		return '';
+	}`)
+	if err != nil {
+		return "", false
+	}
+	s := strings.TrimSpace(res.Value.Str())
+	if s != "" {
+		return s, true
+	}
+	return "", false
+}
+
+// IsSendDisabled checks if the send button is disabled (upstream #17).
+func (b *Base) IsSendDisabled(sendSelectors []string) bool {
+	// Check via DOM disabled attribute and outerText
+	for _, sel := range sendSelectors {
+		selEsc := strings.ReplaceAll(sel, `"`, `\"`)
+		res, err := b.Page.Eval(fmt.Sprintf(`() => {
+			const el = document.querySelector("%s");
+			if (!el) return 'no-el';
+			if (el.disabled) return 'disabled';
+			if (el.getAttribute('aria-disabled') === 'true') return 'disabled';
+			if (el.getAttribute('data-disabled') === 'true') return 'disabled';
+			const cls = el.className || '';
+			if (cls.includes('disabled') || cls.includes('opacity-50')) return 'maybe-disabled';
+			return 'enabled';
+		}`, selEsc))
+		if err == nil {
+			v := res.Value.Str()
+			if v == "disabled" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CountAssistantMessages counts the number of assistant messages on the page.

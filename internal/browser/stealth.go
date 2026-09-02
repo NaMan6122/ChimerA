@@ -1,12 +1,26 @@
 package browser
 
 import (
+	"os"
+
 	"github.com/go-rod/rod"
 )
 
 // applyStealth injects anti-detection patches into the page.
+// Uses page.Evaluate (not add_init_script) to avoid Docker DNS kill
+// (reference: stealth.py Docker workaround — add_init_script breaks Chrome DNS).
 func applyStealth(page *rod.Page) {
-	log.Debugf("Applying stealth patches")
+	inDocker := false
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		inDocker = true
+	} else if os.Getenv("DISPLAY") == ":99" {
+		inDocker = true
+	}
+	if inDocker {
+		log.Debugf("Applying stealth patches (Docker-safe via Evaluate)")
+	} else {
+		log.Debugf("Applying stealth patches")
+	}
 
 	// Remove navigator.webdriver flag
 	_, _ = page.Eval(`() => {

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/chimera/chimera/internal/providers/chatgpt"
 	"github.com/chimera/chimera/internal/providers/claude"
 	"github.com/chimera/chimera/internal/providers/deepseek"
+	"github.com/chimera/chimera/internal/providers/kimi"
 	"github.com/chimera/chimera/internal/providers/qwen"
 )
 
@@ -50,32 +52,58 @@ func main() {
 	log_.Infof("Chimera starting (provider=%s, port=%d)", cfg.Provider, cfg.APIPort)
 	log_.Infof("Provider URL: %s", cfg.ProviderURL())
 
-	// Launch browser
-	browserMgr := browser.NewManager(cfg)
-	page, err := browserMgr.Launch()
-	if err != nil {
-		log.Fatalf("Failed to launch browser: %v", err)
-	}
+	// ── Browser launch: single vs pooled (single Chromium with page-per-provider) ──
+	var (
+		browserMgr *browser.Manager
+		pool       *browser.Pool
+		server     *api.Server
+	)
 
-	// Create provider client
-	provider := createProvider(cfg, page)
-
-	// Initialize provider (verify login, navigate)
-	if err := provider.Init(page, cfg); err != nil {
-		log_.Infof("Initial provider check failed: %v", err)
-		log_.Info("Browser window is OPEN — please log in manually in the Chromium window.")
-		log_.Info("  • Use email/password, Microsoft, Apple, or magic link")
-		log_.Info("  • DO NOT use Google OAuth (blocked in automation)")
-		log_.Info("  • Waiting up to 5 minutes for login to complete...")
-		// Poll for login instead of exiting immediately (fixes headful window closing too fast)
-		waitUntilLoggedIn(provider, 5*time.Minute)
-		log_.Infof("Login detected! Provider %q ready (model=%s)", provider.Name(), provider.ModelID())
+	if cfg.IsPooled() {
+		// Single Chromium, one Page per provider — ~400MB total not 3×400MB
+		pool = browser.NewPool(cfg)
+		providersToLaunch := cfg.PooledProviders()
+		log_.Infof("Chimera pooled mode: launching single Chromium for %v", providersToLaunch)
+		if err := pool.Launch(providersToLaunch, func(name string, page *rod.Page, cfg *config.Config) interface{} {
+			return createProviderByName(name, page, cfg)
+		}); err != nil {
+			log.Fatalf("Failed to launch pool: %v", err)
+		}
+		// Build provider map for API routing
+		poolProviders := make(map[string]providers.Provider)
+		mutexMap := make(map[string]*sync.Mutex)
+		for _, name := range pool.ProviderNames() {
+			if provI, ok := pool.ProviderFor(name); ok {
+				if prov, ok := provI.(providers.Provider); ok {
+					poolProviders[name] = prov
+				}
+			}
+			if mu := pool.MutexFor(name); mu != nil {
+				mutexMap[name] = mu
+			}
+		}
+		server = api.NewPooledServer(cfg, poolProviders, mutexMap, pool.Browser())
+		log_.Infof("Pool ready: %v", pool.ProviderNames())
 	} else {
-		log_.Infof("Provider %q ready (model=%s)", provider.Name(), provider.ModelID())
+		browserMgr = browser.NewManager(cfg)
+		page, err := browserMgr.Launch()
+		if err != nil {
+			log.Fatalf("Failed to launch browser: %v", err)
+		}
+		provider := createProvider(cfg, page)
+		if err := provider.Init(page, cfg); err != nil {
+			log_.Infof("Initial provider check failed: %v", err)
+			log_.Info("Browser window is OPEN — please log in manually in the Chromium window.")
+			log_.Info("  • Use email/password, Microsoft, Apple, or magic link")
+			log_.Info("  • DO NOT use Google OAuth (blocked in automation)")
+			log_.Info("  • Waiting up to 5 minutes for login to complete...")
+			waitUntilLoggedIn(provider, 5*time.Minute)
+			log_.Infof("Login detected! Provider %q ready (model=%s)", provider.Name(), provider.ModelID())
+		} else {
+			log_.Infof("Provider %q ready (model=%s)", provider.Name(), provider.ModelID())
+		}
+		server = api.NewServer(cfg, provider)
 	}
-
-	// Create and start API server
-	server := api.NewServer(cfg, provider)
 
 	addr := fmt.Sprintf("%s:%d", cfg.APIHost, cfg.APIPort)
 	httpServer := &http.Server{
@@ -97,7 +125,11 @@ func main() {
 		<-sigCh
 		log_.Info("Shutting down...")
 		cancel()
-		_ = browserMgr.Close()
+		if pool != nil {
+			_ = pool.Close()
+		} else if browserMgr != nil {
+			_ = browserMgr.Close()
+		}
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
 		_ = httpServer.Shutdown(shutdownCtx)
@@ -130,15 +162,22 @@ func waitUntilLoggedIn(provider providers.Provider, timeout time.Duration) {
 	log.Fatalf("Login timeout after %v — please restart after logging in. Tip: keep the browser window open and complete login within 5 minutes.", timeout)
 }
 
-// createProvider instantiates the correct provider based on config.
+// createProvider instantiates the correct provider based on config (single mode).
 func createProvider(cfg *config.Config, page *rod.Page) providers.Provider {
-	switch cfg.Provider {
+	return createProviderByName(cfg.Provider, page, cfg)
+}
+
+// createProviderByName instantiates a provider by name (used by Pool).
+func createProviderByName(name string, page *rod.Page, cfg *config.Config) providers.Provider {
+	switch name {
 	case config.ProviderClaude:
 		return claude.NewClient(page, cfg)
 	case config.ProviderQwen:
 		return qwen.NewClient(page, cfg)
 	case config.ProviderDeepSeek:
 		return deepseek.NewClient(page, cfg)
+	case config.ProviderKimi:
+		return kimi.NewClient(page, cfg)
 	default:
 		return chatgpt.NewClient(page, cfg)
 	}

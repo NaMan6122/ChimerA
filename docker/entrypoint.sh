@@ -14,19 +14,33 @@ for p in SingletonLock SingletonSocket SingletonCookie; do
   find /app/browser_data -name "$p" -delete 2>/dev/null || true
 done
 
-# DNS pre-resolve (like Chimera's Python socket hack)
+# DNS pre-resolve for Chrome's built-in resolver (fixes DNS_PROBE_FINISHED_NXDOMAIN in Docker)
+# Mirrors reference manager.py _resolve_domains_for_chrome — 17 domains
 echo "[entrypoint] Pre-resolving vendor domains..."
 python3 - << 'PY' || true
 import socket
-hosts = ["chatgpt.com","cdn.oaistatic.com","claude.ai","chat.qwen.ai","chat.deepseek.com"]
+hosts = [
+    "chatgpt.com","cdn.oaistatic.com","ab.chatgpt.com","auth.openai.com","auth0.openai.com",
+    "openai.com","api.openai.com","platform.openai.com",
+    "challenges.cloudflare.com","static.cloudflareinsights.com","tcr9i.chat.openai.com",
+    "claude.ai","api.claude.ai","cdn.claude.ai","anthropic.com","www.anthropic.com",
+    "chat.qwen.ai","www.kimi.com","chat.deepseek.com"
+]
+rules=[]
 for h in hosts:
     try:
         ip = socket.gethostbyname(h)
         print(f"  {h} -> {ip}")
         with open("/etc/hosts","a") as f:
             f.write(f"{ip} {h}\n")
+        rules.append(f"MAP {h} {ip}")
     except Exception as e:
         print(f"  {h} failed: {e}")
+if rules:
+    print(f"[entrypoint] host-resolver-rules: {len(rules)} domains")
+    # Export for chimera manager to pick up via --host-resolver-rules flag if needed
+    with open("/tmp/host_resolver_rules","w") as f:
+        f.write(",".join(rules))
 PY
 
 # VNC password

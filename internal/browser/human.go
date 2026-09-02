@@ -51,19 +51,66 @@ func (h *HumanBehavior) TypeText(text string) error {
 }
 
 // TypeTextFast pastes text as a whole via JavaScript (no per-char delay).
+// For large prompts (>200 chars, e.g., JSON tool calls) it uses ClipboardEvent paste
+// which is O(1) vs execCommand O(n) that freezes — see upstream #23.
 func (h *HumanBehavior) TypeTextFast(text string) error {
-	// Use JS insertText for contenteditable divs (paste-like behavior)
+	// Clear stale input first (selectAll + delete) — mirrors reference human_type
+	_, _ = h.page.Eval(`() => {
+		const el = document.activeElement;
+		if (el) {
+			el.focus();
+			try { document.execCommand('selectAll', false, null); document.execCommand('delete', false, null); } catch(e) {}
+		}
+	}`)
+	time.Sleep(50 * time.Millisecond)
+
+	// Large prompt: use ClipboardEvent paste (instant, no freeze)
+	if len(text) > 200 {
+		_, err := h.page.Eval(`(text) => {
+			const el = document.activeElement;
+			if (!el) return 'no-element';
+			el.focus();
+			try {
+				const dt = new DataTransfer();
+				dt.setData('text/plain', text);
+				const ev = new ClipboardEvent('paste', {bubbles: true, cancelable: true, clipboardData: dt});
+				el.dispatchEvent(ev);
+				// Fallback: if paste didn't insert, try execCommand
+				if (el.isContentEditable && el.innerText.length < text.length/2) {
+					document.execCommand('insertText', false, text);
+				}
+				return 'ok';
+			} catch(e) { return 'err:'+e.message; }
+		}`, text)
+		if err == nil {
+			return nil
+		}
+		// Fall through to execCommand if paste failed
+	}
+
+	// Standard path: execCommand insertText (fires beforeinput/input for ProseMirror)
 	_, err := h.page.Eval(`(text) => {
 		const el = document.activeElement;
 		if (el && el.isContentEditable) {
 			el.focus();
-			document.execCommand('insertText', false, text);
+			return document.execCommand('insertText', false, text) ? 'ok' : 'failed';
 		} else if (el) {
 			el.value += text;
 			el.dispatchEvent(new Event('input', { bubbles: true }));
+			return 'ok';
 		}
+		return 'no-element';
 	}`, text)
+	if err != nil {
+		// Final fallback: rod's native InsertText (CDP InputInsertText)
+		return h.page.InsertText(text)
+	}
 	return err
+}
+
+// InsertText is the smart entry used by providers — delegates to TypeTextFast with length gate.
+func (h *HumanBehavior) InsertText(text string) error {
+	return h.TypeTextFast(text)
 }
 
 // Click performs a human-like click with hover first.
