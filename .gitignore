@@ -1,0 +1,9 @@
+.anvaya/
+browser_data/
+logs/
+thegate
+*.log
+.env
+.DS_Store
+bin/
+last_copied_card.txt
