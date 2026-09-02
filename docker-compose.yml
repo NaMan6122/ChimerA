@@ -1,0 +1,20 @@
+services:
+  chimera:
+    build: .
+    container_name: chimera
+    ports:
+      - "8000:8000"   # OpenAI-compatible API
+      - "6080:6080"   # noVNC (browser UI for login)
+      - "5900:5900"   # VNC
+    volumes:
+      - ./browser_data:/app/browser_data
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    environment:
+      - PROVIDER=${PROVIDER:-chatgpt}
+      - API_TOKEN=${API_TOKEN:-chimera}
+      - API_PORT=8000
+      - HEADLESS=false
+      - VNC_PASSWORD=${VNC_PASSWORD:-chimera}
+    restart: unless-stopped
+    shm_size: 2gb
