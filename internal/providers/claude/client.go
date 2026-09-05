@@ -112,7 +112,7 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 	}
 
 	if c.isEcho(text) {
-		c.Log.Warn("Echo detected, retrying extraction")
+		c.NoteEcho("Echo detected, retrying extraction")
 		time.Sleep(3 * time.Second)
 		responseText, err = c.ExtractLastResponseText(AssistantMessage)
 		if err != nil {

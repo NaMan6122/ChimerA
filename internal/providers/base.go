@@ -10,6 +10,7 @@ import (
 	"github.com/chimera/chimera/internal/browser"
 	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/logging"
+	"github.com/chimera/chimera/internal/telemetry"
 )
 
 // Base provides shared functionality for all providers.
@@ -38,10 +39,14 @@ func (b *Base) Name() string    { return b.Name_ }
 func (b *Base) ModelID() string { return b.ModelID_ }
 
 // FindElement tries multiple CSS selectors and returns the first match.
+// Falls past the first choice are counted: spikes mean a vendor UI changed.
 func (b *Base) FindElement(selectors []string, timeout time.Duration) (*rod.Element, error) {
-	for _, sel := range selectors {
+	for i, sel := range selectors {
 		el, err := b.Page.Timeout(timeout).Element(sel)
 		if err == nil {
+			if i > 0 {
+				telemetry.ObserveSelectorFallback(b.Name_)
+			}
 			return el, nil
 		}
 	}
@@ -220,7 +225,7 @@ func (b *Base) ExtractTextViaCopy(copySelectors []string, msgIndex int) (string,
 
 // ExtractLastResponseText extracts the text of the last assistant message.
 func (b *Base) ExtractLastResponseText(messageSelectors []string) (string, error) {
-	for _, sel := range messageSelectors {
+	for i, sel := range messageSelectors {
 		selEsc := strings.ReplaceAll(sel, `"`, `\"`)
 		result, err := b.Page.Eval(fmt.Sprintf(`() => {
 				const msgs = document.querySelectorAll("%s");
@@ -230,11 +235,21 @@ func (b *Base) ExtractLastResponseText(messageSelectors []string) (string, error
 		if err == nil {
 			text := result.Value.Str()
 			if text != "" {
+				if i > 0 {
+					telemetry.ObserveSelectorFallback(b.Name_)
+				}
 				return text, nil
 			}
 		}
 	}
 	return "", fmt.Errorf("no assistant messages found")
+}
+
+// NoteEcho records an echo-detection re-extraction and logs it.
+// Call when the scraped response contained the prompt and is being re-read.
+func (b *Base) NoteEcho(msg string) {
+	telemetry.ObserveEchoRetry(b.Name_)
+	b.Log.Warn(msg)
 }
 
 // RandomDelay waits a random duration for human simulation.
