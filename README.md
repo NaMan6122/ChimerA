@@ -114,6 +114,9 @@ All in `.env` + env (see `.env.example`):
 | `SELECTOR_TIMEOUT` | `10000` ms | selector fallback timeout |
 | `API_HOST` / `API_PORT` | `0.0.0.0:8000` | listen |
 | `API_TOKEN` | `chimera` | Bearer token; empty disables auth |
+| `API_TOKENS` | `` | multi-tenant `tenant=token,...` pairs |
+| `QUOTA_MONTHLY_REQUESTS` | `0` | per-tenant monthly cap (`0` = unlimited) |
+| `METER_DB` | `./logs/usage.db` | SQLite usage DB; empty disables metering |
 | `RATE_LIMIT_SECONDS` | `2` | token bucket |
 | `LOG_DIR` / `LOG_LEVEL` / `VERBOSE` | `./logs` `debug` `true` | file + stderr |
 | `LOG_FORMAT` | `text` | `text` or `json` (Loki/ELK-friendly, includes `req_id`) |
@@ -143,6 +146,7 @@ See [`docs/API.md`](docs/API.md). OpenAI-compatible:
 - `GET /health` (unauthenticated)
 - `GET /metrics` (unauthenticated Prometheus exposition)
 - `GET /v1/health/providers` (per-provider login status for status pages)
+- `GET /v1/usage?from&to` (per-tenant usage; callers see only their tenant)
 - `GET /v1/models`
 - `POST /v1/chat/completions` (non-stream + `stream:true` SSE + tools)
 - Auth via `Authorization: Bearer <API_TOKEN>`, `x-api-key`, `anthropic-api-key`.
