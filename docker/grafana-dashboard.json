@@ -1,0 +1,66 @@
+{
+  "title": "Chimera Gateway",
+  "uid": "chimera-gateway",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "title": "Chat request rate",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "sum by (provider, code) (rate(chimera_chat_requests_total[5m]))", "legendFormat": "{{provider}} {{code}}"}
+      ]
+    },
+    {
+      "title": "Browser round-trip p50/p95",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (provider, le) (rate(chimera_response_duration_seconds_bucket[5m])))", "legendFormat": "p50 {{provider}}"},
+        {"expr": "histogram_quantile(0.95, sum by (provider, le) (rate(chimera_response_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{provider}}"}
+      ]
+    },
+    {
+      "title": "Provider errors",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "sum by (provider, reason) (rate(chimera_provider_errors_total[5m]))", "legendFormat": "{{provider}} {{reason}}"}
+      ]
+    },
+    {
+      "title": "Selector fallbacks (UI-change radar)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "sum by (provider) (rate(chimera_selector_fallback_total[5m]))", "legendFormat": "{{provider}}"}
+      ]
+    },
+    {
+      "title": "Provider up",
+      "type": "stat",
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "chimera_provider_up", "legendFormat": "{{provider}}"}
+      ]
+    },
+    {
+      "title": "Echo retries",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 9, "x": 6, "y": 16},
+      "targets": [
+        {"expr": "sum by (provider) (rate(chimera_echo_retry_total[5m]))", "legendFormat": "{{provider}}"}
+      ]
+    },
+    {
+      "title": "Lock wait p95",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 9, "x": 15, "y": 16},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (provider, le) (rate(chimera_lock_wait_seconds_bucket[5m])))", "legendFormat": "{{provider}}"}
+      ]
+    }
+  ]
+}
