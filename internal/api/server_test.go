@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-rod/rod"
@@ -180,5 +181,74 @@ func TestHealth(t *testing.T) {
 	srv.Router().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("health expected 200 got %d", w.Code)
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	cfg := testConfig()
+	cfg.RateLimitSeconds = 10
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+
+	// One completion so chat-request counters exist.
+	body := `{"model":"chimera-chatgpt","messages":[{"role":"user","content":"hello"}]}`
+	creq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(body))
+	creq.Header.Set("Content-Type", "application/json")
+	creq.Header.Set("Authorization", "Bearer testtoken")
+	cw := httptest.NewRecorder()
+	srv.Router().ServeHTTP(cw, creq)
+	if cw.Code != http.StatusOK {
+		t.Fatalf("chat status %d body %s", cw.Code, cw.Body.String())
+	}
+
+	// /metrics is unauthenticated like /health.
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("metrics expected 200 got %d", w.Code)
+	}
+	text := w.Body.String()
+	for _, want := range []string{
+		"chimera_chat_requests_total",
+		"chimera_response_duration_seconds",
+		"chimera_http_requests_total",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("metrics exposition missing %q", want)
+		}
+	}
+}
+
+func TestProvidersHealth(t *testing.T) {
+	cfg := testConfig()
+	cfg.RateLimitSeconds = 10
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+
+	req := httptest.NewRequest("GET", "/v1/health/providers", nil)
+	req.Header.Set("Authorization", "Bearer testtoken")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("providers health expected 200 got %d body %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Object string `json:"object"`
+		Data   []struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			Up       bool   `json:"up"`
+			LoggedIn bool   `json:"logged_in"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v body %s", err, w.Body.String())
+	}
+	if resp.Object != "provider_health" || len(resp.Data) != 1 {
+		t.Fatalf("unexpected health payload: %+v", resp)
+	}
+	if resp.Data[0].Provider != "chatgpt" || !resp.Data[0].Up || !resp.Data[0].LoggedIn {
+		t.Fatalf("expected chatgpt up+logged in: %+v", resp.Data[0])
 	}
 }

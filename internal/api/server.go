@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/chimera/chimera/internal/models"
 	"github.com/chimera/chimera/internal/providers"
 	"github.com/chimera/chimera/internal/session"
+	"github.com/chimera/chimera/internal/telemetry"
 	"github.com/chimera/chimera/internal/tools"
 	"golang.org/x/time/rate"
 )
@@ -139,21 +141,32 @@ func (s *Server) setupMiddleware() {
 	s.router.Use(middleware.Logger)
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(middleware.Heartbeat("/health"))
+	s.router.Use(s.metricsMiddleware)
 	s.router.Use(s.corsMiddleware)
 	s.router.Use(s.authMiddleware)
 	s.router.Use(s.rateLimitMiddleware)
+}
+
+// isOpenPath reports paths that skip auth and rate limiting.
+func isOpenPath(path string) bool {
+	return path == "/health" || path == "/" || path == "/metrics"
 }
 
 // setupRoutes registers API routes.
 func (s *Server) setupRoutes() {
 	s.router.Route("/v1", func(r chi.Router) {
 		r.Get("/models", s.handleListModels)
+		r.Get("/health/providers", s.handleProvidersHealth)
 		r.Post("/chat/completions", s.handleChatCompletions)
 		r.Post("/refresh", s.handleRefresh)
 		r.Get("/refresh", s.handleRefresh)
 		r.Post("/new_chat", s.handleRefresh)
 		r.Get("/new_chat", s.handleRefresh)
 	})
+
+	// Prometheus exposition (unauthenticated like /health; front with a
+	// reverse proxy or firewall in multi-tenant deploys).
+	s.router.Get("/metrics", telemetry.Handler().ServeHTTP)
 
 	// Root status
 	s.router.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -233,8 +246,8 @@ func (s *Server) validToken(r *http.Request) bool {
 // authMiddleware validates token if configured.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth for health checks, root, and CORS preflight (handled by corsMiddleware anyway)
-		if r.URL.Path == "/health" || r.URL.Path == "/" || r.Method == http.MethodOptions {
+		// Skip auth for health checks, root, metrics, and CORS preflight
+		if isOpenPath(r.URL.Path) || r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -257,7 +270,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // rateLimitMiddleware applies global rate limiting (nil limiter = disabled).
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" || r.URL.Path == "/" || r.Method == http.MethodOptions {
+		if isOpenPath(r.URL.Path) || r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -271,6 +284,30 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// statusRecorder captures the response code for metrics.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// metricsMiddleware records per-request HTTP metrics.
+func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		telemetry.ObserveHTTP(r.Method, r.URL.Path, strconv.Itoa(rec.status), time.Since(start))
+	})
+}
 // acquireProviderLock locks mu with timeout + client-disconnect awareness.
 // Prevents a hung browser from hanging HTTP forever (returns false on timeout/cancel).
 func acquireProviderLock(ctx context.Context, mu *sync.Mutex, timeout time.Duration) bool {
@@ -332,28 +369,92 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// handleProvidersHealth probes each provider's login state in parallel and
+// returns a snapshot for status pages and alerting. Slow probes time out
+// individually (overall budget 15s) and keep their previous state.
+func (s *Server) handleProvidersHealth(w http.ResponseWriter, r *http.Request) {
+	names := s.providerNames()
+	type probe struct {
+		loggedIn bool
+		errStr   string
+		done     bool
+	}
+	results := make([]probe, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			p, ok := s.providers[name]
+			if !ok || p == nil {
+				results[i] = probe{errStr: "provider not registered", done: true}
+				return
+			}
+			ok, err := p.IsLoggedIn()
+			pr := probe{loggedIn: ok, done: true}
+			if err != nil {
+				pr.errStr = err.Error()
+			}
+			results[i] = pr
+		}(i, name)
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+	case <-r.Context().Done():
+		return
+	}
+	modelsByName := make(map[string]string, len(names))
+	for _, name := range names {
+		if p, ok := s.providers[name]; ok && p != nil {
+			modelsByName[name] = p.ModelID()
+		} else {
+			modelsByName[name] = ""
+		}
+	}
+	for i, name := range names {
+		if results[i].done {
+			telemetry.RecordLoginCheck(name, results[i].loggedIn, results[i].errStr)
+		} else {
+			results[i].errStr = "probe timeout"
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"object": "provider_health",
+		"data":   telemetry.Snapshot(modelsByName),
+	})
+}
+
 // handleChatCompletions handles OpenAI-compatible chat completions.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	alog := log_.WithRequestID(middleware.GetReqID(r.Context()))
 	// Guard against huge bodies (DoS): 2MB is plenty for prompt JSON.
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var req models.ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		telemetry.ObserveChatRequest("none", "", "400")
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("invalid request: %v", err))
 		return
 	}
 
 	// Validate
 	if len(req.Messages) == 0 {
+		telemetry.ObserveChatRequest("none", req.Model, "400")
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "messages array is required")
 		return
 	}
 
-	log_.Infof("Chat completion request (model=%s, messages=%d, stream=%v)",
+	alog.Infof("Chat completion request (model=%s, messages=%d, stream=%v)",
 		req.Model, len(req.Messages), req.Stream)
 
 	// Extract the last user message
 	lastUserMsg := extractLastUserMessage(req.Messages)
 	if lastUserMsg == "" {
+		telemetry.ObserveChatRequest("none", req.Model, "400")
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "no user message found")
 		return
 	}
@@ -361,6 +462,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Resolve provider by model (pooled routing)
 	provider, mu, providerName := s.providerForModel(req.Model)
 	if provider == nil {
+		telemetry.ObserveChatRequest("none", req.Model, "400")
 		writeJSONError(w, http.StatusBadRequest, "model_not_found", "no provider available for model "+req.Model)
 		return
 	}
@@ -379,12 +481,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Session continuity: X-Session-Id / X-Thread-Id header or req.User
 	sessionID := extractSessionID(r, req.User)
 	if sessionID != "" {
-		log_.Infof("Persistent session %s for provider %s (pruning history to avoid duplication)", sessionID, providerName)
+		alog.Infof("Persistent session %s for provider %s (pruning history to avoid duplication)", sessionID, providerName)
 		// Prune to latest turn if not first turn (browser already has history)
 		if len(req.Messages) > 2 {
 			if pruned := buildPrunedPrompt(req.Messages, req.Tools, providerName); pruned != "" {
 				prompt = pruned
-				log_.Infof("Pruned prompt for session %s: %d -> %d chars", sessionID, len(buildPrompt(req.Messages, req.Tools, promptProvider)), len(prompt))
+				alog.Infof("Pruned prompt for session %s: %d -> %d chars", sessionID, len(buildPrompt(req.Messages, req.Tools, promptProvider)), len(prompt))
 			}
 		}
 		// Save session URL after successful response (handled below)
@@ -397,7 +499,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		maxChars = 12000
 	}
 	if len(prompt) > maxChars {
-		log_.Warnf("Pre-flight reject: prompt %d chars exceeds %d", len(prompt), maxChars)
+		alog.Warnf("Pre-flight reject: prompt %d chars exceeds %d", len(prompt), maxChars)
+		telemetry.ObserveChatRequest(providerName, req.Model, "400")
 		writeJSONError(w, http.StatusBadRequest, "message_too_long", fmt.Sprintf("Prompt exceeds %d chars, send button will be disabled. Split or shorten.", maxChars))
 		return
 	}
@@ -409,21 +512,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Non-streaming — per-provider serialized with timeout (no infinite hang)
+	lockStart := time.Now()
 	if !acquireProviderLock(r.Context(), mu, s.cfg.ResponseTimeout+30*time.Second) {
+		telemetry.ObserveLockWait(providerName, time.Since(lockStart))
+		telemetry.ObserveProviderError(providerName, "lock_timeout")
 		if r.Context().Err() != nil {
+			telemetry.ObserveChatRequest(providerName, req.Model, "499")
 			writeJSONError(w, 499, "client_closed", "client disconnected while waiting for provider lock")
 		} else {
+			telemetry.ObserveChatRequest(providerName, req.Model, "504")
 			writeJSONError(w, http.StatusGatewayTimeout, "provider_busy", "provider busy, try again later")
 		}
 		return
 	}
+	telemetry.ObserveLockWait(providerName, time.Since(lockStart))
+	sendStart := time.Now()
 	resp, err := provider.SendMessage(prompt, threadID)
 	mu.Unlock()
+	telemetry.ObserveResponseDuration(providerName, false, time.Since(sendStart))
 	if err != nil {
-		log_.Errorf("Provider %s error: %v", providerName, err)
+		alog.Errorf("Provider %s error: %v", providerName, err)
+		telemetry.ObserveProviderError(providerName, "send_error")
+		telemetry.ObserveChatRequest(providerName, req.Model, "500")
 		writeJSONError(w, http.StatusInternalServerError, "provider_error", fmt.Sprintf("provider error: %v", err))
 		return
 	}
+	telemetry.RecordSuccess(providerName)
+	telemetry.ObserveChatRequest(providerName, req.Model, "200")
 	s.saveSessionURL(sessionID, provider)
 
 	// Parse tool calls from response
@@ -487,6 +602,8 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 
 // handleStreamingCompletionWithProvider is the pooled-aware streaming path (per-provider mutex and model).
 func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r *http.Request, prompt, threadID string, req models.ChatCompletionRequest, provider providers.Provider, mu *sync.Mutex, sessionID string) {
+	alog := log_.WithRequestID(middleware.GetReqID(r.Context()))
+	providerName := provider.Name()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -494,6 +611,7 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		telemetry.ObserveChatRequest(providerName, req.Model, "500")
 		writeJSONError(w, http.StatusInternalServerError, "streaming_unsupported", "streaming not supported")
 		return
 	}
@@ -514,8 +632,12 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 	if mu == nil {
 		mu = &s.mu
 	}
+	lockStart := time.Now()
 	if !acquireProviderLock(r.Context(), mu, s.cfg.ResponseTimeout+30*time.Second) {
-		log_.Errorf("Provider %s streaming lock timeout", provider.Name())
+		alog.Errorf("Provider %s streaming lock timeout", providerName)
+		telemetry.ObserveLockWait(providerName, time.Since(lockStart))
+		telemetry.ObserveProviderError(providerName, "lock_timeout")
+		telemetry.ObserveChatRequest(providerName, req.Model, "504")
 		errorChunk := models.ChatCompletionChunk{
 			ID:      respID,
 			Object:  "chat.completion.chunk",
@@ -527,10 +649,15 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 		flusher.Flush()
 		return
 	}
+	telemetry.ObserveLockWait(providerName, time.Since(lockStart))
+	sendStart := time.Now()
 	providerResp, err := provider.SendMessage(prompt, threadID)
 	mu.Unlock()
+	telemetry.ObserveResponseDuration(providerName, true, time.Since(sendStart))
 	if err != nil {
-		log_.Errorf("Provider %s streaming error: %v", provider.Name(), err)
+		alog.Errorf("Provider %s streaming error: %v", providerName, err)
+		telemetry.ObserveProviderError(providerName, "send_error")
+		telemetry.ObserveChatRequest(providerName, req.Model, "500")
 		errorChunk := models.ChatCompletionChunk{
 			ID:      respID,
 			Object:  "chat.completion.chunk",
@@ -542,6 +669,8 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 		flusher.Flush()
 		return
 	}
+	telemetry.RecordSuccess(providerName)
+	telemetry.ObserveChatRequest(providerName, req.Model, "200")
 	s.saveSessionURL(sessionID, provider)
 
 	text := providerResp.Message
