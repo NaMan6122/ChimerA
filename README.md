@@ -116,6 +116,7 @@ All in `.env` + env (see `.env.example`):
 | `API_TOKEN` | `chimera` | Bearer token; empty disables auth |
 | `RATE_LIMIT_SECONDS` | `2` | token bucket |
 | `LOG_DIR` / `LOG_LEVEL` / `VERBOSE` | `./logs` `debug` `true` | file + stderr |
+| `LOG_FORMAT` | `text` | `text` or `json` (Loki/ELK-friendly, includes `req_id`) |
 
 ---
 
@@ -140,9 +141,13 @@ internal/api                chi router, Bearer auth, rate limit, SSE streaming e
 See [`docs/API.md`](docs/API.md). OpenAI-compatible:
 
 - `GET /health` (unauthenticated)
+- `GET /metrics` (unauthenticated Prometheus exposition)
+- `GET /v1/health/providers` (per-provider login status for status pages)
 - `GET /v1/models`
 - `POST /v1/chat/completions` (non-stream + `stream:true` SSE + tools)
 - Auth via `Authorization: Bearer <API_TOKEN>`, `x-api-key`, `anthropic-api-key`.
+
+See [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for metrics, alerts, and Grafana dashboard.
 
 ---
 

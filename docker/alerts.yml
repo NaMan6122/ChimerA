@@ -1,0 +1,44 @@
+# Chimera alert rules. The selector-fallback rule is the important one:
+# a spike means a vendor shipped a UI redesign and selectors need attention.
+groups:
+  - name: chimera
+    interval: 30s
+    rules:
+      - alert: ChimeraProviderDown
+        expr: chimera_provider_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Chimera provider {{ $labels.provider }} down (login lost?)"
+          description: "Login probe failing for 5m. Re-login via VNC, then POST /v1/refresh."
+
+      - alert: ChimeraSelectorFallbackSpike
+        expr: sum by (provider) (rate(chimera_selector_fallback_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Selector fallbacks rising on {{ $labels.provider }}"
+          description: "First-choice selectors missing — likely a vendor UI change. Inspect selectors.go."
+
+      - alert: ChimeraHighErrorRate
+        expr: |
+          sum by (provider) (rate(chimera_provider_errors_total[5m]))
+          /
+          clamp_min(sum by (provider) (rate(chimera_chat_requests_total[5m])), 0.001) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High provider error rate on {{ $labels.provider }}"
+          description: "Over 30% of chat requests failing for 10m."
+
+      - alert: ChimeraSlowResponses
+        expr: histogram_quantile(0.95, sum by (provider, le) (rate(chimera_response_duration_seconds_bucket[15m]))) > 90
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 browser round-trip over 90s on {{ $labels.provider }}"
+          description: "Vendor slowness or stuck tabs. Check lock-wait and tab health."

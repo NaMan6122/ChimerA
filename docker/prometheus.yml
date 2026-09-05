@@ -1,0 +1,23 @@
+# Prometheus scrape config for Chimera (single-tenant example).
+# Run: docker run -d -p 9090:9090 -v $PWD/docker/prometheus.yml:/etc/prometheus/prometheus.yml \
+#        -v $PWD/docker/alerts.yml:/etc/prometheus/alerts.yml prom/prometheus
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: chimera
+    static_configs:
+      # Single-tenant default. For multi-tenant, add one target per
+      # tenant API port (8101, 8102, ...) with labels tenant="acme".
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          tenant: "default"
