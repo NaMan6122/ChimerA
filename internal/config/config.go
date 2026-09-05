@@ -76,6 +76,12 @@ type Config struct {
 	// Viewport (base, jittered ±20px per launch)
 	ViewportWidth  int
 	ViewportHeight int
+
+	// Pool concurrency per provider
+	MaxConcurrentPerProviderVal int
+
+	// Max prompt chars before fast 400 (upstream #17: send disabled / hang)
+	MaxPromptChars int
 }
 
 // Load creates a Config from environment variables, with .env file support.
@@ -129,6 +135,12 @@ func Load() (*Config, error) {
 		// Viewport
 		ViewportWidth:  1280,
 		ViewportHeight: 720,
+
+		// Pool
+		MaxConcurrentPerProviderVal: getEnvInt("MAX_CONCURRENT_PER_PROVIDER", 3),
+
+		// Pre-flight guard (chars). 12000 ≈ send-disabled threshold.
+		MaxPromptChars: getEnvInt("MAX_PROMPT_CHARS", 12000),
 	}
 
 	// Ensure directories exist
@@ -190,6 +202,13 @@ func (c *Config) PooledProviders() []string {
 		return []string{ProviderChatGPT, ProviderQwen, ProviderDeepSeek}
 	}
 	return []string{c.Provider}
+}
+
+func (c *Config) MaxConcurrentPerProvider() int {
+	if c.MaxConcurrentPerProviderVal <= 0 {
+		return 3
+	}
+	return c.MaxConcurrentPerProviderVal
 }
 
 // EnsureDirs creates required directories if they don't exist.

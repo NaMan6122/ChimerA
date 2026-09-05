@@ -2,9 +2,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -44,7 +46,7 @@ func NewServer(cfg *config.Config, provider providers.Provider) *Server {
 		provider:  provider,
 		providers: map[string]providers.Provider{provider.Name(): provider},
 		mus:       map[string]*sync.Mutex{provider.Name(): &sync.Mutex{}},
-		limiter:   rate.NewLimiter(rate.Limit(1.0/float64(cfg.RateLimitSeconds)), 1),
+		limiter:   newRateLimiter(cfg),
 	}
 
 	s.router = chi.NewRouter()
@@ -62,7 +64,7 @@ func NewPooledServer(cfg *config.Config, poolProviders map[string]providers.Prov
 		providers:  poolProviders,
 		mus:        poolMus,
 		browser:    browser,
-		limiter:    rate.NewLimiter(rate.Limit(1.0/float64(cfg.RateLimitSeconds)), 1),
+		limiter:    newRateLimiter(cfg),
 		sessionMgr: session.New(browser, 10),
 	}
 	// Set default single provider for fallback (prefer chatgpt if present)
@@ -82,8 +84,17 @@ func NewPooledServer(cfg *config.Config, poolProviders map[string]providers.Prov
 	return s
 }
 
+// newRateLimiter builds the global token bucket. RateLimitSeconds<=0 disables limiting.
+func newRateLimiter(cfg *config.Config) *rate.Limiter {
+	if cfg == nil || cfg.RateLimitSeconds <= 0 {
+		return nil
+	}
+	return rate.NewLimiter(rate.Limit(1.0/float64(cfg.RateLimitSeconds)), 1)
+}
+
 // providerForModel resolves a model ID to a provider and its mutex.
 // Supports "chimera-chatgpt", "chimera-qwen", "chatgpt", etc. Falls back to default.
+// Fallback order is deterministic: default provider, then chatgpt, then sorted names.
 func (s *Server) providerForModel(model string) (providers.Provider, *sync.Mutex, string) {
 	// Direct match on ModelID
 	for _, p := range s.providers {
@@ -108,9 +119,15 @@ func (s *Server) providerForModel(model string) (providers.Provider, *sync.Mutex
 		}
 		return s.provider, mu, name
 	}
-	// Last resort: first pooled
-	for name, p := range s.providers {
-		return p, s.mus[name], name
+	// Last resort: deterministic first pooled (prefer chatgpt, else sorted)
+	if p, ok := s.providers[config.ProviderChatGPT]; ok {
+		return p, s.mus[config.ProviderChatGPT], config.ProviderChatGPT
+	}
+	names := s.providerNames()
+	if len(names) > 0 {
+		// providerNames is sorted; pick first for determinism
+		name := names[0]
+		return s.providers[name], s.mus[name], name
 	}
 	return nil, &s.mu, ""
 }
@@ -122,6 +139,7 @@ func (s *Server) setupMiddleware() {
 	s.router.Use(middleware.Logger)
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(middleware.Heartbeat("/health"))
+	s.router.Use(s.corsMiddleware)
 	s.router.Use(s.authMiddleware)
 	s.router.Use(s.rateLimitMiddleware)
 }
@@ -131,6 +149,10 @@ func (s *Server) setupRoutes() {
 	s.router.Route("/v1", func(r chi.Router) {
 		r.Get("/models", s.handleListModels)
 		r.Post("/chat/completions", s.handleChatCompletions)
+		r.Post("/refresh", s.handleRefresh)
+		r.Get("/refresh", s.handleRefresh)
+		r.Post("/new_chat", s.handleRefresh)
+		r.Get("/new_chat", s.handleRefresh)
 	})
 
 	// Root status
@@ -156,14 +178,63 @@ func (s *Server) providerNames() []string {
 	for k := range s.providers {
 		names = append(names, k)
 	}
+	sort.Strings(names)
 	return names
 }
 
-// authMiddleware validates Bearer token if configured.
+// corsMiddleware provides permissive CORS (mirrors Chimera's CORSMiddleware).
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-Api-Key, X-Session-Id, X-Thread-Id, Anthropic-Api-Key")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// writeJSONError writes a consistent OpenAI-style JSON error.
+func writeJSONError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]string{
+			"type":    code,
+			"message": message,
+		},
+	})
+}
+
+// validToken checks Authorization Bearer plus x-api-key / anthropic-api-key headers.
+func (s *Server) validToken(r *http.Request) bool {
+	if s.cfg.APIToken == "" {
+		return true
+	}
+	if r.Header.Get("Authorization") == "Bearer "+s.cfg.APIToken {
+		return true
+	}
+	// Docs: also accept x-api-key and anthropic-api-key (bare token or Bearer).
+	for _, h := range []string{"X-Api-Key", "Anthropic-Api-Key"} {
+		v := strings.TrimSpace(r.Header.Get(h))
+		if v == "" {
+			continue
+		}
+		if v == s.cfg.APIToken || v == "Bearer "+s.cfg.APIToken {
+			return true
+		}
+	}
+	return false
+}
+
+// authMiddleware validates token if configured.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth for health checks and root
-		if r.URL.Path == "/health" || r.URL.Path == "/" {
+		// Skip auth for health checks, root, and CORS preflight (handled by corsMiddleware anyway)
+		if r.URL.Path == "/health" || r.URL.Path == "/" || r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -174,9 +245,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		token := r.Header.Get("Authorization")
-		if token != "Bearer "+s.cfg.APIToken {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		if !s.validToken(r) {
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 
@@ -184,21 +254,45 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// rateLimitMiddleware applies per-client rate limiting.
+// rateLimitMiddleware applies global rate limiting (nil limiter = disabled).
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" || r.URL.Path == "/" {
+		if r.URL.Path == "/health" || r.URL.Path == "/" || r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		if !s.limiter.Allow() {
-			http.Error(w, `{"error":"rate limit exceeded, try again later"}`, http.StatusTooManyRequests)
+		if s.limiter != nil && !s.limiter.Allow() {
+			writeJSONError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "rate limit exceeded, try again later")
 			return
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// acquireProviderLock locks mu with timeout + client-disconnect awareness.
+// Prevents a hung browser from hanging HTTP forever (returns false on timeout/cancel).
+func acquireProviderLock(ctx context.Context, mu *sync.Mutex, timeout time.Duration) bool {
+	if mu == nil {
+		return true
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+		}
+		if mu.TryLock() {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }
 
 // Router returns the HTTP handler/mux.
@@ -212,7 +306,8 @@ func (s *Server) Router() http.Handler {
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	var data []models.ModelObject
 	if s.isPooled() {
-		for _, p := range s.providers {
+		for _, name := range s.providerNames() {
+			p := s.providers[name]
 			data = append(data, models.ModelObject{
 				ID:      p.ModelID(),
 				Object:  "model",
@@ -239,15 +334,17 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 // handleChatCompletions handles OpenAI-compatible chat completions.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	// Guard against huge bodies (DoS): 2MB is plenty for prompt JSON.
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var req models.ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"invalid request: %v"}`, err), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("invalid request: %v", err))
 		return
 	}
 
 	// Validate
 	if len(req.Messages) == 0 {
-		http.Error(w, `{"error":"messages array is required"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "messages array is required")
 		return
 	}
 
@@ -257,14 +354,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Extract the last user message
 	lastUserMsg := extractLastUserMessage(req.Messages)
 	if lastUserMsg == "" {
-		http.Error(w, `{"error":"no user message found"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "no user message found")
 		return
 	}
 
 	// Resolve provider by model (pooled routing)
 	provider, mu, providerName := s.providerForModel(req.Model)
 	if provider == nil {
-		http.Error(w, `{"error":"no provider available for model `+req.Model+`"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "model_not_found", "no provider available for model "+req.Model)
 		return
 	}
 	if mu == nil {
@@ -295,29 +392,39 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Pre-flight: message too long → fast 400 instead of 2m hang (upstream #17)
-	if len(prompt) > 12000 {
-		log_.Warnf("Pre-flight reject: prompt %d chars exceeds 12000", len(prompt))
-		http.Error(w, `{"error":{"type":"message_too_long","message":"Prompt exceeds 12000 chars, send button will be disabled. Split or shorten."}}`, http.StatusBadRequest)
+	maxChars := s.cfg.MaxPromptChars
+	if maxChars <= 0 {
+		maxChars = 12000
+	}
+	if len(prompt) > maxChars {
+		log_.Warnf("Pre-flight reject: prompt %d chars exceeds %d", len(prompt), maxChars)
+		writeJSONError(w, http.StatusBadRequest, "message_too_long", fmt.Sprintf("Prompt exceeds %d chars, send button will be disabled. Split or shorten.", maxChars))
 		return
 	}
 
-	// Handle streaming
+	// Handle streaming (unified pooled-aware path)
 	if req.Stream {
-		s.handleStreamingCompletionWithProvider(w, r, prompt, threadID, req, provider, mu)
+		s.handleStreamingCompletionWithProvider(w, r, prompt, threadID, req, provider, mu, sessionID)
 		return
 	}
 
-	// Non-streaming — per-provider serialized
-	mu.Lock()
-	start := time.Now()
+	// Non-streaming — per-provider serialized with timeout (no infinite hang)
+	if !acquireProviderLock(r.Context(), mu, s.cfg.ResponseTimeout+30*time.Second) {
+		if r.Context().Err() != nil {
+			writeJSONError(w, 499, "client_closed", "client disconnected while waiting for provider lock")
+		} else {
+			writeJSONError(w, http.StatusGatewayTimeout, "provider_busy", "provider busy, try again later")
+		}
+		return
+	}
 	resp, err := provider.SendMessage(prompt, threadID)
 	mu.Unlock()
-	_ = start
 	if err != nil {
 		log_.Errorf("Provider %s error: %v", providerName, err)
-		http.Error(w, fmt.Sprintf(`{"error":"provider error: %v"}`, err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "provider_error", fmt.Sprintf("provider error: %v", err))
 		return
 	}
+	s.saveSessionURL(sessionID, provider)
 
 	// Parse tool calls from response
 	var toolCalls []models.ToolCall
@@ -352,111 +459,34 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(completion)
 }
 
-// handleStreamingCompletion handles streaming SSE responses.
+// saveSessionURL persists the conversation URL for X-Session-Id continuity.
+// No-op when sessionID empty or sessionMgr nil (single mode).
+func (s *Server) saveSessionURL(sessionID string, provider providers.Provider) {
+	if sessionID == "" || s.sessionMgr == nil || provider == nil {
+		return
+	}
+	type urlGetter interface{ CurrentURL() string }
+	// Providers embed *providers.Base which exposes CurrentURL; use assertion to avoid interface churn.
+	if g, ok := provider.(urlGetter); ok {
+		if u := g.CurrentURL(); u != "" {
+			s.sessionMgr.SaveURL(sessionID, u)
+		}
+	}
+}
+
+// handleStreamingCompletion is the legacy single-provider entrypoint (kept for tests/back-compat).
+// Delegates to the unified pooled-aware implementation.
 func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Request, prompt, threadID string, req models.ChatCompletionRequest) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
+	provider, mu, _ := s.providerForModel(req.Model)
+	if provider == nil {
+		provider = s.provider
+		mu = &s.mu
 	}
-
-	respID := models.NewResponseID()
-	created := time.Now().Unix()
-
-	// Send initial chunk with role
-	initialChunk := models.ChatCompletionChunk{
-		ID:      respID,
-		Object:  "chat.completion.chunk",
-		Created: created,
-		Model:   s.provider.ModelID(),
-		Choices: []models.ChunkChoice{
-			{
-				Index: 0,
-				Delta: models.DeltaMsg{Role: "assistant"},
-			},
-		},
-	}
-	sendSSE(w, initialChunk)
-	flusher.Flush()
-
-	// Get full response from provider (serialized)
-	s.mu.Lock()
-	providerResp, err := s.provider.SendMessage(prompt, threadID)
-	s.mu.Unlock()
-	if err != nil {
-		log_.Errorf("Provider streaming error: %v", err)
-		errorChunk := models.ChatCompletionChunk{
-			ID:      respID,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   s.provider.ModelID(),
-			Choices: []models.ChunkChoice{
-				{
-					Index:        0,
-					Delta:        models.DeltaMsg{Content: fmt.Sprintf("Error: %v", err)},
-					FinishReason: "stop",
-				},
-			},
-		}
-		sendSSE(w, errorChunk)
-		flusher.Flush()
-		return
-	}
-
-	// Simulate streaming by sending text in chunks
-	text := providerResp.Message
-	chunkSize := 20 // characters per chunk
-	for i := 0; i < len(text); i += chunkSize {
-		end := i + chunkSize
-		if end > len(text) {
-			end = len(text)
-		}
-
-		chunk := models.ChatCompletionChunk{
-			ID:      respID,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   s.provider.ModelID(),
-			Choices: []models.ChunkChoice{
-				{
-					Index: 0,
-					Delta: models.DeltaMsg{Content: text[i:end]},
-				},
-			},
-		}
-		sendSSE(w, chunk)
-		flusher.Flush()
-		time.Sleep(10 * time.Millisecond) // Throttle
-	}
-
-	// Final chunk
-	finalChunk := models.ChatCompletionChunk{
-		ID:      respID,
-		Object:  "chat.completion.chunk",
-		Created: created,
-		Model:   s.provider.ModelID(),
-		Choices: []models.ChunkChoice{
-			{
-				Index:        0,
-				FinishReason: "stop",
-			},
-		},
-	}
-	sendSSE(w, finalChunk)
-	flusher.Flush()
-
-	// End of stream
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	flusher.Flush()
+	s.handleStreamingCompletionWithProvider(w, r, prompt, threadID, req, provider, mu, extractSessionID(r, req.User))
 }
 
 // handleStreamingCompletionWithProvider is the pooled-aware streaming path (per-provider mutex and model).
-func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r *http.Request, prompt, threadID string, req models.ChatCompletionRequest, provider providers.Provider, mu *sync.Mutex) {
+func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r *http.Request, prompt, threadID string, req models.ChatCompletionRequest, provider providers.Provider, mu *sync.Mutex, sessionID string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -464,7 +494,7 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "streaming_unsupported", "streaming not supported")
 		return
 	}
 
@@ -484,7 +514,19 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 	if mu == nil {
 		mu = &s.mu
 	}
-	mu.Lock()
+	if !acquireProviderLock(r.Context(), mu, s.cfg.ResponseTimeout+30*time.Second) {
+		log_.Errorf("Provider %s streaming lock timeout", provider.Name())
+		errorChunk := models.ChatCompletionChunk{
+			ID:      respID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   provider.ModelID(),
+			Choices: []models.ChunkChoice{{Index: 0, Delta: models.DeltaMsg{Content: "Error: provider busy, try again later"}, FinishReason: "stop"}},
+		}
+		sendSSE(w, errorChunk)
+		flusher.Flush()
+		return
+	}
 	providerResp, err := provider.SendMessage(prompt, threadID)
 	mu.Unlock()
 	if err != nil {
@@ -500,10 +542,16 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 		flusher.Flush()
 		return
 	}
+	s.saveSessionURL(sessionID, provider)
 
 	text := providerResp.Message
 	chunkSize := 20
 	for i := 0; i < len(text); i += chunkSize {
+		select {
+		case <-r.Context().Done():
+			return
+		default:
+		}
 		end := i + chunkSize
 		if end > len(text) {
 			end = len(text)
@@ -665,6 +713,78 @@ func buildPrunedPrompt(messages []models.ChatMessage, toolDefs []models.Tool, pr
 	// Prepend system if present and first turn? For pruned we keep system only if first turn, else drop to avoid duplication.
 	// Keep system only if messages has system and pruned is first turn equivalent
 	return buildPrompt(pruned, toolDefs, provider)
+}
+
+// handleRefresh refreshes the provider tab (navigates to new chat).
+// Supports ?provider=qwen&model=chimera-qwen or JSON {"model":"chimera-qwen"}.
+// Used to recover from stale DOM / “no assistant messages found” after long idle.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	// Resolve target provider: query ?provider= or ?model= or JSON body {"model":"...","provider":"..."}
+	targetModel := r.URL.Query().Get("model")
+	if targetModel == "" {
+		targetModel = r.URL.Query().Get("provider")
+	}
+	// Try JSON body as fallback (ignore error — body may be empty for GET)
+	if targetModel == "" && r.Body != nil && r.ContentLength != 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		var body struct {
+			Model    string `json:"model"`
+			Provider string `json:"provider"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Model != "" {
+			targetModel = body.Model
+		} else if body.Provider != "" {
+			targetModel = body.Provider
+		}
+	}
+	var provider providers.Provider
+	var mu *sync.Mutex
+	var providerName string
+	if targetModel != "" {
+		provider, mu, providerName = s.providerForModel(targetModel)
+	} else {
+		// Default to single provider or deterministic first pooled
+		if s.provider != nil {
+			providerName = s.provider.Name()
+			provider = s.provider
+			mu = s.mus[providerName]
+			if mu == nil {
+				mu = &s.mu
+			}
+		} else {
+			provider, mu, providerName = s.providerForModel("")
+		}
+	}
+	if provider == nil {
+		writeJSONError(w, http.StatusBadRequest, "model_not_found", "no provider found for refresh")
+		return
+	}
+	if mu == nil {
+		mu = &s.mu
+	}
+	log_.Infof("Refresh requested for provider %s (model hint=%q) from %s", providerName, targetModel, r.RemoteAddr)
+	if !acquireProviderLock(r.Context(), mu, 30*time.Second) {
+		writeJSONError(w, http.StatusGatewayTimeout, "provider_busy", "provider busy, try again later")
+		return
+	}
+	start := time.Now()
+	err := provider.NewChat()
+	elapsed := time.Since(start)
+	mu.Unlock()
+	if err != nil {
+		log_.Errorf("Refresh failed for %s: %v (elapsed %v)", providerName, err, elapsed)
+		writeJSONError(w, http.StatusInternalServerError, "provider_error", fmt.Sprintf("refresh failed for %s: %v", providerName, err))
+		return
+	}
+	log_.Infof("Refresh succeeded for %s in %v", providerName, elapsed)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "ok",
+		"provider": providerName,
+		"model":    provider.ModelID(),
+		"elapsed_ms": elapsed.Milliseconds(),
+	})
 }
 
 // determineFinishReason returns the appropriate finish reason.
