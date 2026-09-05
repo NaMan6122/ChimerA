@@ -96,6 +96,30 @@ func (b *Base) WaitForResponse(stopSelectors []string) error {
 	return fmt.Errorf("response timeout after %v", b.Cfg.ResponseTimeout)
 }
 
+// WaitForCopyButton waits for the copy button on the Nth assistant message (primary for ChatGPT, avoids truncation).
+func (b *Base) WaitForCopyButton(copySelectors []string, msgIndex int) error {
+	deadline := time.Now().Add(b.Cfg.ResponseTimeout)
+	for time.Now().Before(deadline) {
+		if msg, ok := b.HasErrorBanner(); ok {
+			return fmt.Errorf("provider error banner: %s", msg)
+		}
+		for _, sel := range copySelectors {
+			selEsc := strings.ReplaceAll(sel, `"`, `\"`)
+			res, err := b.Page.Eval(fmt.Sprintf(`() => {
+				const btns = document.querySelectorAll("%s");
+				return btns.length;
+			}`, selEsc))
+			if err == nil && res.Value.Int() > msgIndex {
+				b.Log.Debugf("Copy button detected for msg %d", msgIndex)
+				time.Sleep(800 * time.Millisecond) // ensure streaming settled
+				return nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("copy button timeout for msg %d", msgIndex)
+}
+
 // HasErrorBanner checks for provider error banners like "message too long".
 func (b *Base) HasErrorBanner() (string, bool) {
 	res, err := b.Page.Eval(`() => {
@@ -260,4 +284,17 @@ func (b *Base) InjectClipboardPolyfill() {
 			};
 		}
 	}`)
+}
+
+// CurrentURL returns the provider page URL for session continuity.
+// Safe to call even if page is nil/closed — returns "" on failure.
+func (b *Base) CurrentURL() string {
+	if b.Page == nil {
+		return ""
+	}
+	info, err := b.Page.Info()
+	if err != nil || info == nil {
+		return ""
+	}
+	return info.URL
 }
