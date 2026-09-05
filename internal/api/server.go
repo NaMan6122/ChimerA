@@ -16,7 +16,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/chimera/chimera/internal/config"
+	"github.com/chimera/chimera/internal/auth"
 	"github.com/chimera/chimera/internal/logging"
+	"github.com/chimera/chimera/internal/meter"
 	"github.com/chimera/chimera/internal/models"
 	"github.com/chimera/chimera/internal/providers"
 	"github.com/chimera/chimera/internal/session"
@@ -38,7 +40,44 @@ type Server struct {
 	sessionMgr *session.Manager               // X-Session-Id continuity
 	browser    *rod.Browser                   // for session pages
 	limiter    *rate.Limiter
+	keys       *auth.Keys   // credential -> tenant registry
+	meter      *meter.Store // usage recording, nil when METER_DB=""
 	mu         sync.Mutex // serializes browser access for single mode
+}
+
+// keysForConfig returns the parsed registry, building one from raw tokens
+// for hand-constructed configs (tests) that skip config.Load.
+func keysForConfig(cfg *config.Config) *auth.Keys {
+	if cfg != nil && cfg.APIKeys != nil {
+		return cfg.APIKeys
+	}
+	token, extra := "", ""
+	if cfg != nil {
+		token, extra = cfg.APIToken, cfg.APITokens
+	}
+	keys, err := auth.New(token, extra)
+	if err != nil {
+		// Single raw token never fails parsing; malformed extras fail open
+		// here but config.Load refuses to start. Log loudly.
+		log_.Errorf("Bad API tokens, starting with primary only: %v", err)
+		keys, _ = auth.New(token, "")
+	}
+	return keys
+}
+
+// openMeter opens usage recording unless METER_DB is empty.
+// Fail-open with a loud log: a bad path must not take the gateway down,
+// but billing gaps are always worth shouting about.
+func openMeter(cfg *config.Config) *meter.Store {
+	if cfg == nil || strings.TrimSpace(cfg.MeterDB) == "" {
+		return nil
+	}
+	st, err := meter.Open(cfg.MeterDB)
+	if err != nil {
+		log_.Errorf("Metering disabled, cannot open %q: %v", cfg.MeterDB, err)
+		return nil
+	}
+	return st
 }
 
 // NewServer creates a new API server for single provider.
@@ -49,6 +88,8 @@ func NewServer(cfg *config.Config, provider providers.Provider) *Server {
 		providers: map[string]providers.Provider{provider.Name(): provider},
 		mus:       map[string]*sync.Mutex{provider.Name(): &sync.Mutex{}},
 		limiter:   newRateLimiter(cfg),
+		keys:      keysForConfig(cfg),
+		meter:     openMeter(cfg),
 	}
 
 	s.router = chi.NewRouter()
@@ -67,6 +108,8 @@ func NewPooledServer(cfg *config.Config, poolProviders map[string]providers.Prov
 		mus:        poolMus,
 		browser:    browser,
 		limiter:    newRateLimiter(cfg),
+		keys:       keysForConfig(cfg),
+		meter:      openMeter(cfg),
 		sessionMgr: session.New(browser, 10),
 	}
 	// Set default single provider for fallback (prefer chatgpt if present)
@@ -157,6 +200,7 @@ func (s *Server) setupRoutes() {
 	s.router.Route("/v1", func(r chi.Router) {
 		r.Get("/models", s.handleListModels)
 		r.Get("/health/providers", s.handleProvidersHealth)
+		r.Get("/usage", s.handleUsage)
 		r.Post("/chat/completions", s.handleChatCompletions)
 		r.Post("/refresh", s.handleRefresh)
 		r.Get("/refresh", s.handleRefresh)
@@ -222,25 +266,46 @@ func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
-// validToken checks Authorization Bearer plus x-api-key / anthropic-api-key headers.
-func (s *Server) validToken(r *http.Request) bool {
-	if s.cfg.APIToken == "" {
-		return true
-	}
-	if r.Header.Get("Authorization") == "Bearer "+s.cfg.APIToken {
-		return true
-	}
-	// Docs: also accept x-api-key and anthropic-api-key (bare token or Bearer).
-	for _, h := range []string{"X-Api-Key", "Anthropic-Api-Key"} {
-		v := strings.TrimSpace(r.Header.Get(h))
-		if v == "" {
-			continue
-		}
-		if v == s.cfg.APIToken || v == "Bearer "+s.cfg.APIToken {
-			return true
+// tenantOf resolves the caller tenant ("default" for single-key or open gateways).
+func (s *Server) tenantOf(r *http.Request) string {
+	if s.keys != nil {
+		if t, ok := s.keys.Authenticate(r); ok && t != "" {
+			return t
 		}
 	}
-	return false
+	return auth.DefaultTenant
+}
+
+// quotaExceeded reports whether the tenant exhausted its monthly request quota.
+// Fail-open on store errors (logged): metering must not 500 live traffic.
+func (s *Server) quotaExceeded(tenant string) bool {
+	limit := 0
+	if s.cfg != nil {
+		limit = s.cfg.QuotaMonthlyRequests
+	}
+	if limit <= 0 || s.meter == nil {
+		return false
+	}
+	used, err := s.meter.MonthCount(tenant, time.Now())
+	if err != nil {
+		log_.Errorf("Quota check failed for tenant %q: %v", tenant, err)
+		return false
+	}
+	return used >= limit
+}
+
+// recordUsage stores one provider attempt; no-op when metering is disabled.
+func (s *Server) recordUsage(tenant, provider, model string, streaming bool, promptChars, completionChars int, latency time.Duration, code int) {
+	if s.meter == nil {
+		return
+	}
+	if err := s.meter.Record(meter.Record{
+		TS: time.Now(), Tenant: tenant, Provider: provider, Model: model,
+		Streaming: streaming, PromptChars: promptChars, CompletionChars: completionChars,
+		LatencyMs: latency.Milliseconds(), Code: code,
+	}); err != nil {
+		log_.Errorf("Usage record failed for tenant %q: %v", tenant, err)
+	}
 }
 
 // authMiddleware validates token if configured.
@@ -252,13 +317,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// If no token configured, skip auth
-		if s.cfg.APIToken == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		if !s.validToken(r) {
+		if _, ok := s.keys.Authenticate(r); !ok {
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
@@ -429,6 +488,67 @@ func (s *Server) handleProvidersHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleUsage returns the caller's usage summary over the inclusive window
+// [from, to]. Query params from/to are RFC3339 (default: current UTC month).
+// Callers only ever see their own tenant.
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	if s.meter == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "metering_disabled", "usage metering is disabled (METER_DB empty)")
+		return
+	}
+	tenant := s.tenantOf(r)
+	now := time.Now().UTC()
+	from := now
+	{
+		y, m, _ := now.Date()
+		from = time.Date(y, m, 1, 0, 0, 0, 0, time.UTC)
+	}
+	to := now
+	if v := strings.TrimSpace(r.URL.Query().Get("from")); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_request", "bad from timestamp, want RFC3339")
+			return
+		}
+		from = t
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("to")); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_request", "bad to timestamp, want RFC3339")
+			return
+		}
+		to = t
+	}
+	if !to.After(from) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "to must be after from")
+		return
+	}
+	u, err := s.meter.Summarize(tenant, from, to)
+	if err != nil {
+		log_.Errorf("Usage summarize failed for tenant %q: %v", tenant, err)
+		writeJSONError(w, http.StatusInternalServerError, "provider_error", "usage lookup failed")
+		return
+	}
+	limit := 0
+	if s.cfg != nil {
+		limit = s.cfg.QuotaMonthlyRequests
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"object":          "usage",
+		"tenant":          tenant,
+		"from":            from.Format(time.RFC3339),
+		"to":              to.Format(time.RFC3339),
+		"requests":        u.Requests,
+		"prompt_chars":    u.PromptChars,
+		"completion_chars": u.CompletionChars,
+		"errors":          u.Errors,
+		"by_provider":     u.ByProvider,
+		"quota_monthly":   limit,
+	})
+}
+
 // handleChatCompletions handles OpenAI-compatible chat completions.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	alog := log_.WithRequestID(middleware.GetReqID(r.Context()))
@@ -505,6 +625,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Monthly quota gate (after cheap validation, before browser work).
+	tenant := s.tenantOf(r)
+	if s.quotaExceeded(tenant) {
+		alog.Warnf("Quota exceeded for tenant %q", tenant)
+		telemetry.ObserveChatRequest(providerName, req.Model, "429")
+		writeJSONError(w, http.StatusTooManyRequests, "quota_exceeded", "monthly request quota exceeded, upgrade or wait for reset")
+		return
+	}
+
 	// Handle streaming (unified pooled-aware path)
 	if req.Stream {
 		s.handleStreamingCompletionWithProvider(w, r, prompt, threadID, req, provider, mu, sessionID)
@@ -521,6 +650,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, 499, "client_closed", "client disconnected while waiting for provider lock")
 		} else {
 			telemetry.ObserveChatRequest(providerName, req.Model, "504")
+			s.recordUsage(tenant, providerName, req.Model, false, len(prompt), 0, time.Since(lockStart), 504)
 			writeJSONError(w, http.StatusGatewayTimeout, "provider_busy", "provider busy, try again later")
 		}
 		return
@@ -534,11 +664,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		alog.Errorf("Provider %s error: %v", providerName, err)
 		telemetry.ObserveProviderError(providerName, "send_error")
 		telemetry.ObserveChatRequest(providerName, req.Model, "500")
+		s.recordUsage(tenant, providerName, req.Model, false, len(prompt), 0, time.Since(sendStart), 500)
 		writeJSONError(w, http.StatusInternalServerError, "provider_error", fmt.Sprintf("provider error: %v", err))
 		return
 	}
 	telemetry.RecordSuccess(providerName)
 	telemetry.ObserveChatRequest(providerName, req.Model, "200")
+	s.recordUsage(tenant, providerName, req.Model, false, len(prompt), len(resp.Message), time.Since(sendStart), 200)
 	s.saveSessionURL(sessionID, provider)
 
 	// Parse tool calls from response
@@ -604,6 +736,7 @@ func (s *Server) handleStreamingCompletion(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r *http.Request, prompt, threadID string, req models.ChatCompletionRequest, provider providers.Provider, mu *sync.Mutex, sessionID string) {
 	alog := log_.WithRequestID(middleware.GetReqID(r.Context()))
 	providerName := provider.Name()
+	tenant := s.tenantOf(r)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -638,6 +771,7 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 		telemetry.ObserveLockWait(providerName, time.Since(lockStart))
 		telemetry.ObserveProviderError(providerName, "lock_timeout")
 		telemetry.ObserveChatRequest(providerName, req.Model, "504")
+		s.recordUsage(tenant, providerName, req.Model, true, len(prompt), 0, time.Since(lockStart), 504)
 		errorChunk := models.ChatCompletionChunk{
 			ID:      respID,
 			Object:  "chat.completion.chunk",
@@ -658,6 +792,7 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 		alog.Errorf("Provider %s streaming error: %v", providerName, err)
 		telemetry.ObserveProviderError(providerName, "send_error")
 		telemetry.ObserveChatRequest(providerName, req.Model, "500")
+		s.recordUsage(tenant, providerName, req.Model, true, len(prompt), 0, time.Since(sendStart), 500)
 		errorChunk := models.ChatCompletionChunk{
 			ID:      respID,
 			Object:  "chat.completion.chunk",
@@ -671,6 +806,7 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 	}
 	telemetry.RecordSuccess(providerName)
 	telemetry.ObserveChatRequest(providerName, req.Model, "200")
+	s.recordUsage(tenant, providerName, req.Model, true, len(prompt), len(providerResp.Message), time.Since(sendStart), 200)
 	s.saveSessionURL(sessionID, provider)
 
 	text := providerResp.Message

@@ -252,3 +252,146 @@ func TestProvidersHealth(t *testing.T) {
 		t.Fatalf("expected chatgpt up+logged in: %+v", resp.Data[0])
 	}
 }
+
+func chatBody(msg string) string {
+	return `{"model":"chimera-chatgpt","messages":[{"role":"user","content":"` + msg + `"}]}`
+}
+
+func doChat(t *testing.T, srv *Server, token, msg string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(chatBody(msg)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	return w
+}
+
+func testMeterConfig(t *testing.T) *config.Config {
+	t.Helper()
+	cfg := testConfig()
+	cfg.RateLimitSeconds = 0 // no rate limiter interference
+	cfg.MeterDB = t.TempDir() + "/usage.db"
+	return cfg
+}
+
+func TestMultiKeyAuth(t *testing.T) {
+	cfg := testMeterConfig(t)
+	cfg.APIToken = "sek"
+	cfg.APITokens = "acme=a1"
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+	if srv.meter != nil {
+		defer srv.meter.Close()
+	}
+
+	// Tenant key via x-api-key works and is isolated to its tenant.
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(chatBody("hi")))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "a1")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("tenant key expected 200 got %d body %s", w.Code, w.Body.String())
+	}
+
+	// Unknown key rejected.
+	w2 := doChat(t, srv, "nope", "hi")
+	if w2.Code != http.StatusUnauthorized {
+		t.Fatalf("bad key expected 401 got %d", w2.Code)
+	}
+
+	// Usage is attributed per tenant.
+	ureq := httptest.NewRequest("GET", "/v1/usage", nil)
+	ureq.Header.Set("X-Api-Key", "a1")
+	uw := httptest.NewRecorder()
+	srv.Router().ServeHTTP(uw, ureq)
+	if uw.Code != http.StatusOK {
+		t.Fatalf("usage expected 200 got %d body %s", uw.Code, uw.Body.String())
+	}
+	var uresp struct {
+		Tenant   string `json:"tenant"`
+		Requests int    `json:"requests"`
+	}
+	if err := json.Unmarshal(uw.Body.Bytes(), &uresp); err != nil {
+		t.Fatal(err)
+	}
+	if uresp.Tenant != "acme" || uresp.Requests != 1 {
+		t.Fatalf("unexpected usage: %+v", uresp)
+	}
+}
+
+func TestQuotaEnforced(t *testing.T) {
+	cfg := testMeterConfig(t)
+	cfg.QuotaMonthlyRequests = 1
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+	if srv.meter != nil {
+		defer srv.meter.Close()
+	}
+
+	if w := doChat(t, srv, "testtoken", "one"); w.Code != http.StatusOK {
+		t.Fatalf("first request expected 200 got %d", w.Code)
+	}
+	w := doChat(t, srv, "testtoken", "two")
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request expected 429 got %d body %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "quota_exceeded") {
+		t.Fatalf("expected quota_exceeded body, got %s", w.Body.String())
+	}
+}
+
+func TestUsageEndpoint(t *testing.T) {
+	cfg := testMeterConfig(t)
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+	if srv.meter != nil {
+		defer srv.meter.Close()
+	}
+
+	for _, msg := range []string{"a", "b"} {
+		if w := doChat(t, srv, "testtoken", msg); w.Code != http.StatusOK {
+			t.Fatalf("chat expected 200 got %d", w.Code)
+		}
+	}
+	req := httptest.NewRequest("GET", "/v1/usage", nil)
+	req.Header.Set("Authorization", "Bearer testtoken")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("usage expected 200 got %d body %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Object        string         `json:"object"`
+		Tenant        string         `json:"tenant"`
+		Requests      int            `json:"requests"`
+		PromptChars   int64          `json:"prompt_chars"`
+		ByProvider    map[string]int `json:"by_provider"`
+		QuotaMonthly  int            `json:"quota_monthly"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Object != "usage" || resp.Tenant != "default" || resp.Requests != 2 {
+		t.Fatalf("unexpected usage: %+v", resp)
+	}
+	if resp.ByProvider["chatgpt"] != 2 || resp.PromptChars <= 0 {
+		t.Fatalf("unexpected breakdown: %+v", resp)
+	}
+}
+
+func TestUsageMeteringDisabled(t *testing.T) {
+	cfg := testConfig()
+	cfg.RateLimitSeconds = 0
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p) // MeterDB "" → disabled
+
+	req := httptest.NewRequest("GET", "/v1/usage", nil)
+	req.Header.Set("Authorization", "Bearer testtoken")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 got %d", w.Code)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chimera/chimera/internal/auth"
 	"github.com/joho/godotenv"
 )
 
@@ -54,21 +55,27 @@ type Config struct {
 	SelectorTimeout time.Duration
 
 	// Human simulation
-	TypingSpeedMin  time.Duration
-	TypingSpeedMax  time.Duration
+	TypingSpeedMin   time.Duration
+	TypingSpeedMax   time.Duration
 	ThinkingPauseMin time.Duration
 	ThinkingPauseMax time.Duration
 
 	// Logging
-	LogDir    string
-	LogLevel  string
-	Verbose   bool
+	LogDir   string
+	LogLevel string
+	Verbose  bool
 
 	// API Server
-	APIHost           string
-	APIPort           int
-	RateLimitSeconds  int
-	APIToken          string
+	APIHost          string
+	APIPort          int
+	RateLimitSeconds int
+	APIToken         string
+	APITokens        string
+	APIKeys          *auth.Keys
+
+	// Metering (per-tenant usage + quotas). MeterDB "" disables recording.
+	MeterDB              string
+	QuotaMonthlyRequests int
 
 	// VNC
 	VNCPassword string
@@ -128,6 +135,7 @@ func Load() (*Config, error) {
 		APIPort:          getEnvInt("API_PORT", 8000),
 		RateLimitSeconds: getEnvInt("RATE_LIMIT_SECONDS", 2),
 		APIToken:         getEnvStr("API_TOKEN", ""),
+		APITokens:        getEnvStr("API_TOKENS", ""),
 
 		// VNC
 		VNCPassword: getEnvStr("VNC_PASSWORD", "chimera"),
@@ -147,6 +155,20 @@ func Load() (*Config, error) {
 	if err := cfg.EnsureDirs(); err != nil {
 		return nil, fmt.Errorf("creating directories: %w", err)
 	}
+
+	// Metering defaults: on, under the log dir. Explicitly empty METER_DB disables.
+	cfg.MeterDB = filepath.Join(cfg.LogDir, "usage.db")
+	if v, ok := os.LookupEnv("METER_DB"); ok {
+		cfg.MeterDB = strings.TrimSpace(v)
+	}
+	cfg.QuotaMonthlyRequests = getEnvInt("QUOTA_MONTHLY_REQUESTS", 0)
+
+	// Parse credentials now so bad API_TOKENS fails fast instead of opening the gateway.
+	keys, err := auth.New(cfg.APIToken, cfg.APITokens)
+	if err != nil {
+		return nil, fmt.Errorf("parsing API tokens: %w", err)
+	}
+	cfg.APIKeys = keys
 
 	// Validate provider
 	valid := false
