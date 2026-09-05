@@ -60,8 +60,8 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 	start := time.Now()
 	c.Log.Infof("Sending message (thread=%s, len=%d)", threadID, len(text))
 
-	// Count existing assistant messages before sending (for logging / future copy-button logic)
-	_, _ = c.CountAssistantMessages(AssistantMessage[0])
+	// Count existing assistant messages before sending for copy-button index
+	preCount, _ := c.CountAssistantMessages(AssistantMessage[0])
 
 	// Random delay for human simulation
 	c.RandomDelay()
@@ -99,7 +99,7 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 		}
 	}
 
-	// Wait for response
+	// Wait for response — copy button primary (avoids truncation), stop button fallback
 	stopSelectors := StopButton
 	// Early disabled/error check (upstream #17)
 	if c.IsSendDisabled(SendButton) {
@@ -108,9 +108,14 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 		}
 		return nil, fmt.Errorf("send button disabled (message too long or rate limited)")
 	}
-	if err := c.WaitForResponse(stopSelectors); err != nil {
-		// Try copy button detection as fallback
-		c.Log.Warnf("Stop button detection failed, trying copy button: %v", err)
+	// Primary: copy button appears only after full response (ordered fallback chain)
+	if err := c.WaitForCopyButton(CopyButton, preCount); err != nil {
+		c.Log.Debugf("Copy button wait failed for msg %d: %v, falling back to stop button", preCount, err)
+		if err := c.WaitForResponse(stopSelectors); err != nil {
+			c.Log.Warnf("Stop button detection also failed: %v", err)
+		}
+	} else {
+		c.Log.Debugf("Copy button detected for msg %d, response complete", preCount)
 	}
 
 	// DOM settle

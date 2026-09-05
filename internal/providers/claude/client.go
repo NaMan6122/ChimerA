@@ -58,7 +58,7 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 	start := time.Now()
 	c.Log.Infof("Sending message (thread=%s, len=%d)", threadID, len(text))
 
-	_, _ = c.CountAssistantMessages(AssistantMessage[0])
+	preCount, _ := c.CountAssistantMessages(AssistantMessage[0])
 
 	c.RandomDelay()
 
@@ -90,14 +90,17 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 	}
 
 	// Claude uses a different streaming detection mechanism
-	// Wait for the streaming indicator to appear and disappear
+	// Early disabled check
 	if c.IsSendDisabled(SendButton) {
 		if msg, ok := c.HasErrorBanner(); ok {
 			return nil, fmt.Errorf("send disabled: %s", msg)
 		}
 		return nil, fmt.Errorf("send button disabled (message too long or rate limited)")
 	}
-	if err := c.WaitForStreaming(); err != nil {
+	// Primary: copy button (ordered fallback, avoids truncation), fallback to streaming attr
+	if err := c.WaitForCopyButton(CopyButton, preCount); err == nil {
+		c.Log.Debugf("Copy button detected for msg %d", preCount)
+	} else if err := c.WaitForStreaming(); err != nil {
 		c.Log.Warnf("Streaming detection failed: %v", err)
 	}
 

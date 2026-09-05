@@ -16,29 +16,44 @@ import (
 	"github.com/chimera/chimera/internal/logging"
 )
 
-// Pool manages a single Chromium instance with one Page per provider.
-// Each provider gets its own tab (rod.Page) + mutex for serialized DOM access per provider.
-// Cross-provider requests run concurrently (different mutexes), same-provider serializes.
+// Pool manages a single Chromium instance with page-per-provider pool.
+// Each provider gets N tabs (default 3) in a buffered chan for concurrent requests.
+// Cross-provider concurrent, same-provider up to N concurrent.
 type Pool struct {
-	cfg       *config.Config
-	browser   *rod.Browser
-	pages     map[string]*rod.Page
-	providers map[string]interface{}
-	mus       map[string]*sync.Mutex
-	log       *logging.Logger
+	cfg        *config.Config
+	browser    *rod.Browser
+	pages      map[string]*rod.Page // legacy single page per provider (for session continuity)
+	providers  map[string]interface{}
+	mus        map[string]*sync.Mutex
+	pageChans  map[string]chan *poolEntry // per-provider pool of 3 tabs
+	providerChans map[string]chan interface{}
+	log        *logging.Logger
 	controlURL string
+	maxPerProvider int
+}
+
+type poolEntry struct {
+	page     *rod.Page
+	provider interface{}
 }
 
 var poolLog = logging.New("pool", "./logs", "debug", true)
 
 // NewPool creates a Pool for the given config.
 func NewPool(cfg *config.Config) *Pool {
+	max := 3
+	if v := cfg.MaxConcurrentPerProvider(); v > 0 {
+		max = v
+	}
 	return &Pool{
-		cfg:       cfg,
-		pages:     make(map[string]*rod.Page),
-		providers: make(map[string]interface{}),
-		mus:       make(map[string]*sync.Mutex),
-		log:       poolLog,
+		cfg:            cfg,
+		pages:          make(map[string]*rod.Page),
+		providers:      make(map[string]interface{}),
+		mus:            make(map[string]*sync.Mutex),
+		pageChans:      make(map[string]chan *poolEntry),
+		providerChans:  make(map[string]chan interface{}),
+		log:            poolLog,
+		maxPerProvider: max,
 	}
 }
 
@@ -127,57 +142,83 @@ func (p *Pool) Launch(providersToLaunch []string, providerFactory func(name stri
 	}
 	p.browser = browser
 
-	// Create a Page per provider sequentially (to avoid race on first navigation)
+	// Create Pages per provider (maxPerProvider, default 3) sequentially
 	for _, name := range providersToLaunch {
-		poolLog.Infof("Pool creating page for %s", name)
-		page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
-		if err != nil {
-			return fmt.Errorf("creating page for %s: %w", name, err)
-		}
-		_ = page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{Width: vw + rand.Intn(10) - 5, Height: vh + rand.Intn(10) - 5})
-		_, _ = page.Eval(`() => { Object.defineProperty(navigator, 'webdriver', { get: () => false }); }`)
-		applyStealth(page)
-
-		// Navigate to provider URL
+		// Init per-provider chan
+		p.pageChans[name] = make(chan *poolEntry, p.maxPerProvider)
+		p.mus[name] = &sync.Mutex{} // keep for backward compat single-page fallback
 		url := providerURLFor(name, p.cfg)
-		poolLog.Infof("Pool navigating %s -> %s", name, url)
-		err = rod.Try(func() {
-			page.Timeout(30 * time.Second).MustNavigate(url)
-		})
-		if err != nil {
-			return fmt.Errorf("navigating %s to %s: %w", name, url, err)
-		}
-		_ = page.WaitLoad()
-		time.Sleep(2 * time.Second)
-		applyStealth(page)
+		for i := 0; i < p.maxPerProvider; i++ {
+			poolLog.Infof("Pool creating page %d/%d for %s", i+1, p.maxPerProvider, name)
+			page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
+			if err != nil {
+				return fmt.Errorf("creating page %d for %s: %w", i, name, err)
+			}
+			_ = page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{Width: vw + rand.Intn(10) - 5, Height: vh + rand.Intn(10) - 5})
+			_, _ = page.Eval(`() => { Object.defineProperty(navigator, 'webdriver', { get: () => false }); }`)
+			applyStealth(page)
 
-		// Create provider instance via factory
-		prov := providerFactory(name, page, p.cfg)
-		if prov == nil {
-			poolLog.Warnf("Pool %s factory returned nil, skipping", name)
-			continue
-		}
-		// Try Init, if not logged in wait for manual login (same as single mode)
-		if initer, ok := prov.(interface{ Init(*rod.Page, *config.Config) error }); ok {
-			if err := initer.Init(page, p.cfg); err != nil {
-				poolLog.Infof("Pool %s not logged in: %v — waiting for login (5m)", name, err)
-				poolLog.Infof("PLEASE LOG IN to %s in its Chromium tab (look for tab titled %s)", name, url)
-				if err := waitForLogin(prov, 5*time.Minute); err != nil {
-					poolLog.Warnf("Pool %s login timeout, skipping (pool continues): %v", name, err)
-					continue
+			poolLog.Infof("Pool navigating %s [%d] -> %s", name, i+1, url)
+			err = rod.Try(func() {
+				page.Timeout(30 * time.Second).MustNavigate(url)
+			})
+			if err != nil {
+				return fmt.Errorf("navigating %s to %s: %w", name, url, err)
+			}
+			_ = page.WaitLoad()
+			time.Sleep(2 * time.Second)
+			applyStealth(page)
+
+			prov := providerFactory(name, page, p.cfg)
+			if prov == nil {
+				poolLog.Warnf("Pool %s factory returned nil, skipping", name)
+				_ = page.Close()
+				continue
+			}
+			// Only first page needs full Init + login wait; others reuse same session (cookies shared via pool dir)
+			if i == 0 {
+				if initer, ok := prov.(interface{ Init(*rod.Page, *config.Config) error }); ok {
+					if err := initer.Init(page, p.cfg); err != nil {
+						poolLog.Infof("Pool %s not logged in: %v — waiting for login (5m)", name, err)
+						poolLog.Infof("PLEASE LOG IN to %s in its Chromium tab (look for tab titled %s)", name, url)
+						if err := waitForLogin(prov, 5*time.Minute); err != nil {
+							poolLog.Warnf("Pool %s login timeout, skipping (pool continues): %v", name, err)
+							_ = page.Close()
+							continue
+						}
+						poolLog.Infof("Pool %s login detected", name)
+					} else {
+						poolLog.Infof("Pool %s ready", name)
+					}
 				}
-				poolLog.Infof("Pool %s login detected", name)
+				// Keep first page/provider as legacy single-page fallback
+				p.pages[name] = page
+				p.providers[name] = prov
 			} else {
-				poolLog.Infof("Pool %s ready", name)
+				// Additional pages share same login (pool dir cookies), no need to Init again
+				// Create a lightweight provider wrapper for this page
+				extraProv := providerFactory(name, page, p.cfg)
+				// No Init wait for extras — assume logged in via shared cookies
+				_ = extraProv
+			}
+			// Push to chan for future Acquire (P1.6 ready, server still uses mutex for now)
+			p.pageChans[name] <- &poolEntry{page: page, provider: prov}
+		}
+		// For backward compat, ensure providers map has at least one
+		if _, ok := p.providers[name]; !ok {
+			// try to get from chan
+			select {
+			case e := <-p.pageChans[name]:
+				p.pages[name] = e.page
+				p.providers[name] = e.provider
+				// put back
+				p.pageChans[name] <- e
+			default:
 			}
 		}
-
-		p.pages[name] = page
-		p.providers[name] = prov
-		p.mus[name] = &sync.Mutex{}
 	}
 
-	poolLog.Infof("Pool ready with %d providers", len(p.pages))
+	poolLog.Infof("Pool ready with %d providers, %d pages each", len(p.pages), p.maxPerProvider)
 	return nil
 }
 
