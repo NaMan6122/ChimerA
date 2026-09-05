@@ -58,6 +58,8 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 	start := time.Now()
 	c.Log.Infof("Sending message (thread=%s, len=%d)", threadID, len(text))
 
+	preCount, _ := c.CountAssistantMessages(AssistantMessage[0])
+
 	c.RandomDelay()
 
 	input, err := c.FindElement(ChatInput, c.Cfg.SelectorTimeout)
@@ -87,7 +89,7 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 		}
 	}
 
-	// Wait for response via stop button lifecycle
+	// Wait for response — copy button primary, then stop button, then text stability
 	// Early disabled/error check (upstream #17)
 	if c.IsSendDisabled(SendButton) {
 		if msg, ok := c.HasErrorBanner(); ok {
@@ -95,7 +97,9 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 		}
 		return nil, fmt.Errorf("send button disabled (message too long or rate limited)")
 	}
-	if err := c.WaitForResponse(StopButton); err != nil {
+	if err := c.WaitForCopyButton(CopyButton, preCount); err == nil {
+		c.Log.Debugf("Copy button detected for msg %d", preCount)
+	} else if err := c.WaitForResponse(StopButton); err != nil {
 		// Fallback: text stability detection
 		c.Log.Warnf("Stop button detection failed: %v, trying text stability", err)
 		if err := c.waitForTextStability(); err != nil {
