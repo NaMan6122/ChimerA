@@ -2,8 +2,11 @@
 browser_data/
 logs/
 thegate
+chimera
 *.log
 .env
+tenants/
+!.gitkeep
 .DS_Store
 bin/
 last_copied_card.txt
