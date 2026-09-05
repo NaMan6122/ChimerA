@@ -1,0 +1,35 @@
+# Chimera single-tenant deploy — 1 container = 1 Chromium = 1 customer.
+# Usage:
+#   TENANT_ID=acme API_PORT=8101 VNC_PORT=5901 NOVNC_PORT=6081 ./scripts/new-tenant.sh
+#   TENANT_ID=acme docker compose -f docker-compose.tenant.yml up -d --build
+#   open http://localhost:6081/vnc.html
+#
+# Required env: TENANT_ID. Optional with defaults: API_PORT=8101, VNC_PORT=5901, NOVNC_PORT=6081,
+# PROVIDER, API_TOKEN, VNC_PASSWORD (loaded from tenants/<id>.env if present).
+
+services:
+  chimera:
+    build: .
+    container_name: chimera-${TENANT_ID:?set TENANT_ID}
+    ports:
+      - "${API_PORT:-8101}:8000"
+      - "${NOVNC_PORT:-6081}:6080"
+      - "${VNC_PORT:-5901}:5900"
+    volumes:
+      - ./tenants/${TENANT_ID}/browser_data:/app/browser_data
+      - ./tenants/${TENANT_ID}/logs:/app/logs
+      - ./tenants/${TENANT_ID}.env:/app/.env:ro
+    env_file:
+      - ./tenants/${TENANT_ID}.env
+    environment:
+      - PROVIDER=${PROVIDER:-chatgpt}
+      - API_PORT=8000
+      - HEADLESS=false
+    restart: unless-stopped
+    shm_size: 2gb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
