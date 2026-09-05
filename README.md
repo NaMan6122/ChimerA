@@ -1,6 +1,8 @@
 # Chimera — Browser-Based LLM Gateway (Go)
 
-> **Turn any browser ChatGPT / Claude / Qwen / DeepSeek account into an OpenAI-compatible API.** No API keys — just your browser login.
+> **Your chat subscriptions, as an OpenAI-compatible API.** Bring your own ChatGPT / Claude / Qwen / DeepSeek / Kimi login — no API keys, session stays in your Chromium. Self-host MIT, or let us host your isolated browser.
+>
+> See [`docs/SAAS.md`](docs/SAAS.md) for open-source SaaS positioning, pricing, and single-tenant serving.
 
 Port of [Chimera-Gateway](https://github.com/GautamVhavle/Chimera-Gateway) (Python + Patchright + FastAPI) to **Go + rod + chi** for a lightweight, static-binary, operationally cheap gateway.
 
@@ -72,6 +74,28 @@ print(resp.choices[0].message.content)
 for chunk in client.chat.completions.create(model="chimera-chatgpt", messages=[{"role":"user","content":"Write a story"}], stream=True):
     if chunk.choices[0].delta.content:
         print(chunk.choices[0].delta.content, end="", flush=True)
+```
+
+---
+
+## Self-Host vs Managed (Open-Source SaaS)
+
+|  | Self-host (MIT, free) | Managed single-tenant (paid) |
+|---|---|---|
+| Run | `docker compose up` | isolated container per tenant |
+| Login | `:6080/vnc.html` | private VNC URL |
+| Data | your disk (`./browser_data`) | per-tenant volume |
+| Updates | you pull | maintained selectors + uptime |
+
+Starter pricing: **Solo $19/mo/browser (5k req)** · **Team $79/mo/browser (50k req, `PROVIDER=all`)** · **Scale custom**. Billed on browser-hours, not tokens. Full tiers + Fly/K8s guide in [`docs/SAAS.md`](docs/SAAS.md).
+
+Single-tenant deploy:
+
+```bash
+TENANT_ID=acme API_PORT=8101 VNC_PORT=5901 NOVNC_PORT=6081 ./scripts/new-tenant.sh
+TENANT_ID=acme docker compose -f docker-compose.tenant.yml up -d --build
+open http://localhost:6081/vnc.html  # tenant logs in once
+curl -H "Authorization: Bearer <tenant-token>" http://localhost:8101/v1/models
 ```
 
 ---
@@ -174,6 +198,12 @@ go test ./internal/tools -v             # tool parser tests (add)
 - Selectors brittle → only `selectors.go` needs edit on vendor UI change
 - Tool calling reliable for 1–7 tools via prompting
 - Single page → serialized via `sync.Mutex` (Chimera's `BrowserPagePool` multi-tab is roadmap)
+
+---
+
+## Disclaimer
+
+Browser automation may violate vendor ToS (OpenAI, Anthropic, etc.). Use your own accounts for personal automation / evaluation, never share credentials or resell tokens. Not affiliated. One tenant = one browser = one login. See [`docs/SAAS.md`](docs/SAAS.md).
 
 ---
 
