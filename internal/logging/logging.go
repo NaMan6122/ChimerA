@@ -2,12 +2,14 @@
 package logging
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Level represents log severity.
@@ -38,97 +40,121 @@ func parseLevel(s string) Level {
 }
 
 // Logger is a simple leveled logger.
+// Format is chosen once via LOG_FORMAT=json (default: text). Use
+// WithRequestID to tag all lines from one HTTP request (chi RequestID).
 type Logger struct {
-	name  string
-	level Level
-	debug *log.Logger
-	info  *log.Logger
-	warn  *log.Logger
-	err   *log.Logger
+	name   string
+	level  Level
+	out    io.Writer
+	format string
+	reqID  string
+	mu     *sync.Mutex
 }
 
-// New creates a new Logger writing to the given directory.
+// New creates a new Logger writing to stderr (if verbose) and a log file.
 func New(name, logDir, level string, verbose bool) *Logger {
 	lvl := parseLevel(level)
 
-	var debugW, infoW, warnW, errW io.Writer
-
+	var out io.Writer = &noopWriter{}
 	if verbose {
-		debugW = io.MultiWriter(os.Stderr, &noopWriter{})
-		infoW = io.MultiWriter(os.Stderr, &noopWriter{})
-		warnW = io.MultiWriter(os.Stderr, &noopWriter{})
-		errW = io.MultiWriter(os.Stderr, &noopWriter{})
-	} else {
-		debugW = &noopWriter{}
-		infoW = &noopWriter{}
-		warnW = &noopWriter{}
-		errW = &noopWriter{}
+		out = os.Stderr
 	}
 
 	// Also write to log files
 	logFile := filepath.Join(logDir, name+".log")
 	if f, ferr := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
-		debugW = io.MultiWriter(debugW, f)
-		infoW = io.MultiWriter(infoW, f)
-		warnW = io.MultiWriter(warnW, f)
-		errW = io.MultiWriter(errW, f)
+		out = io.MultiWriter(out, f)
 	}
 
-	return &Logger{
-		name:  name,
-		level: lvl,
-		debug: log.New(debugW, fmt.Sprintf("[%s] DEBUG ", name), log.Ltime),
-		info:  log.New(infoW, fmt.Sprintf("[%s] INFO  ", name), log.Ltime),
-		warn:  log.New(warnW, fmt.Sprintf("[%s] WARN  ", name), log.Ltime),
-		err:   log.New(errW, fmt.Sprintf("[%s] ERROR ", name), log.Ltime),
+	format := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_FORMAT")))
+	if format != "json" {
+		format = "text"
 	}
+
+	return &Logger{name: name, level: lvl, out: out, format: format, mu: &sync.Mutex{}}
+}
+
+// WithRequestID returns a copy that tags lines with the request ID.
+// Returns the same logger when id is empty.
+func (l *Logger) WithRequestID(id string) *Logger {
+	if id == "" {
+		return l
+	}
+	c := *l
+	c.reqID = id
+	return &c
+}
+
+func (l *Logger) output(level, msg string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.format == "json" {
+		rec := map[string]string{
+			"ts":     time.Now().Format(time.RFC3339),
+			"level":  strings.ToLower(level),
+			"logger": l.name,
+			"msg":    msg,
+		}
+		if l.reqID != "" {
+			rec["req_id"] = l.reqID
+		}
+		_ = json.NewEncoder(l.out).Encode(rec)
+		return
+	}
+	// Text format mirrors the historic "[name] LEVEL HH:MM:SS msg" layout.
+	ts := time.Now().Format("15:04:05")
+	if l.reqID != "" {
+		fmt.Fprintf(l.out, "[%s] %-6s%s [req=%s] %s\n", l.name, level, ts, l.reqID, msg)
+		return
+	}
+	fmt.Fprintf(l.out, "[%s] %-6s%s %s\n", l.name, level, ts, msg)
 }
 
 func (l *Logger) Debugf(format string, args ...any) {
 	if l.level <= LevelDebug {
-		l.debug.Printf(format, args...)
+		l.output("DEBUG", fmt.Sprintf(format, args...))
 	}
 }
 
 func (l *Logger) Infof(format string, args ...any) {
 	if l.level <= LevelInfo {
-		l.info.Printf(format, args...)
+		l.output("INFO", fmt.Sprintf(format, args...))
 	}
 }
 
 func (l *Logger) Warnf(format string, args ...any) {
 	if l.level <= LevelWarn {
-		l.warn.Printf(format, args...)
+		l.output("WARN", fmt.Sprintf(format, args...))
 	}
 }
 
 func (l *Logger) Errorf(format string, args ...any) {
 	if l.level <= LevelError {
-		l.err.Printf(format, args...)
+		l.output("ERROR", fmt.Sprintf(format, args...))
 	}
 }
 
 func (l *Logger) Debug(args ...any) {
 	if l.level <= LevelDebug {
-		l.debug.Print(args...)
+		l.output("DEBUG", fmt.Sprint(args...))
 	}
 }
 
 func (l *Logger) Info(args ...any) {
 	if l.level <= LevelInfo {
-		l.info.Print(args...)
+		l.output("INFO", fmt.Sprint(args...))
 	}
 }
 
 func (l *Logger) Warn(args ...any) {
 	if l.level <= LevelWarn {
-		l.warn.Print(args...)
+		l.output("WARN", fmt.Sprint(args...))
 	}
 }
 
 func (l *Logger) Error(args ...any) {
 	if l.level <= LevelError {
-		l.err.Print(args...)
+		l.output("ERROR", fmt.Sprint(args...))
 	}
 }
 
