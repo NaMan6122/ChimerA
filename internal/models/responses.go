@@ -16,14 +16,14 @@ import (
 
 // ResponsesRequest is an OpenAI-compatible /v1/responses request.
 type ResponsesRequest struct {
-	Model           string            `json:"model"`
-	Instructions    string            `json:"instructions,omitempty"`
-	Input           json.RawMessage   `json:"input"`
-	Tools           []ResponsesTool   `json:"tools,omitempty"`
-	ToolChoice      interface{}       `json:"tool_choice,omitempty"`
-	Stream          bool              `json:"stream,omitempty"`
-	MaxOutputTokens *int              `json:"max_output_tokens,omitempty"`
-	User            string            `json:"user,omitempty"`
+	Model           string          `json:"model"`
+	Instructions    string          `json:"instructions,omitempty"`
+	Input           json.RawMessage `json:"input"`
+	Tools           []ResponsesTool `json:"tools,omitempty"`
+	ToolChoice      interface{}     `json:"tool_choice,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+	MaxOutputTokens *int            `json:"max_output_tokens,omitempty"`
+	User            string          `json:"user,omitempty"`
 }
 
 // ResponsesTool is a flat function tool (unlike chat's nested {function:{...}}).
@@ -188,13 +188,13 @@ type ResponseOutputItem struct {
 
 // ResponseObject is an OpenAI-compatible /v1/responses response.
 type ResponseObject struct {
-	ID     string               `json:"id"`
-	Object string               `json:"object"`
-	Created int64               `json:"created_at"`
-	Model  string               `json:"model"`
-	Status string               `json:"status"`
-	Output []ResponseOutputItem `json:"output"`
-	Usage  ResponsesUsage       `json:"usage"`
+	ID      string               `json:"id"`
+	Object  string               `json:"object"`
+	Created int64                `json:"created_at"`
+	Model   string               `json:"model"`
+	Status  string               `json:"status"`
+	Output  []ResponseOutputItem `json:"output"`
+	Usage   ResponsesUsage       `json:"usage"`
 }
 
 // NewResponseObjectID generates an OpenAI-style response ID (resp_...).

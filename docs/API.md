@@ -142,6 +142,27 @@ for chunk in client.chat.completions.create(model="chimera-chatgpt", messages=[{
 
 ---
 
+### `POST /v1/responses`
+
+Codex-style endpoint sharing the chat pipeline (provider routing, pre-flight guard,
+quota, locks, telemetry, metering). Non-streaming only.
+
+```bash
+curl -X POST http://localhost:8000/v1/responses \
+  -H "Content-Type: application/json" -H "Authorization: Bearer chimera" \
+  -d '{"model":"chimera-chatgpt","instructions":"Be brief.","input":"Why is the sky blue?"}'
+```
+
+- `input`: string **or** item array (`message` with `input_text` blocks,
+  `function_call_output` for tool follow-ups; unknown items ignored).
+- `tools`: flat `{"type":"function","name","description","parameters"}` list.
+- Output: `{id:"resp_…", object:"response", status:"completed",
+  output:[{type:"message",…}|{type:"function_call",…}], usage:{input_tokens,…}}`.
+- `stream:true` → 400 `streaming_unsupported`. Unknown `model` falls back to the
+  default provider, like chat.
+
+---
+
 ## Auth & Rate Limit
 
 - All `/v1/*` require Bearer token if `API_TOKEN` set; `/health` and `/` are open.
