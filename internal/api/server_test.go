@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/chimera/chimera/internal/config"
@@ -393,5 +394,170 @@ func TestUsageMeteringDisabled(t *testing.T) {
 	srv.Router().ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 got %d", w.Code)
+	}
+}
+
+func doResponses(t *testing.T, srv *Server, token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/v1/responses", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	return w
+}
+
+func TestResponsesTextTurn(t *testing.T) {
+	cfg := testMeterConfig(t)
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+	if srv.meter != nil {
+		defer srv.meter.Close()
+	}
+
+	w := doResponses(t, srv, "testtoken", `{"model":"chimera-chatgpt","input":"hello"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+	var resp models.ResponseObject
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Object != "response" || resp.Status != "completed" {
+		t.Fatalf("unexpected envelope: %+v", resp)
+	}
+	if resp.Model != "chimera-chatgpt" {
+		t.Fatalf("model mismatch %q", resp.Model)
+	}
+	if len(resp.Output) != 1 || resp.Output[0].Type != "message" {
+		t.Fatalf("expected one message item: %+v", resp.Output)
+	}
+	if len(resp.Output[0].Content) != 1 || resp.Output[0].Content[0].Text == "" {
+		t.Fatalf("empty message content: %+v", resp.Output[0])
+	}
+	if resp.Usage.TotalTokens == 0 {
+		t.Fatalf("missing usage: %+v", resp.Usage)
+	}
+}
+
+func TestResponsesInstructionsAndItems(t *testing.T) {
+	cfg := testMeterConfig(t)
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+	if srv.meter != nil {
+		defer srv.meter.Close()
+	}
+
+	body := `{"model":"chimera-chatgpt","instructions":"Be brief.","input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+		{"type":"reasoning","content":"skip me"}
+	]}`
+	w := doResponses(t, srv, "testtoken", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+	var resp models.ResponseObject
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Output) != 1 || resp.Output[0].Type != "message" {
+		t.Fatalf("unexpected output: %+v", resp.Output)
+	}
+}
+
+func TestResponsesToolCall(t *testing.T) {
+	cfg := testMeterConfig(t)
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+	if srv.meter != nil {
+		defer srv.meter.Close()
+	}
+
+	body := `{"model":"chimera-chatgpt","input":"trigger_tool",
+		"tools":[{"type":"function","name":"get_weather","description":"Get weather",
+		"parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}`
+	w := doResponses(t, srv, "testtoken", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+	var resp models.ResponseObject
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Output) != 1 || resp.Output[0].Type != "function_call" {
+		t.Fatalf("expected one function_call: %+v", resp.Output)
+	}
+	fc := resp.Output[0]
+	if fc.Name != "get_weather" || fc.CallID == "" {
+		t.Fatalf("bad function call: %+v", fc)
+	}
+	var args map[string]string
+	if err := json.Unmarshal([]byte(fc.Arguments), &args); err != nil || args["city"] != "Tokyo" {
+		t.Fatalf("bad arguments %q", fc.Arguments)
+	}
+}
+
+func TestResponsesFunctionCallOutput(t *testing.T) {
+	cfg := testMeterConfig(t)
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+	if srv.meter != nil {
+		defer srv.meter.Close()
+	}
+
+	// Follow-up turn carrying only a tool result, no new user message.
+	body := `{"model":"chimera-chatgpt","input":[
+		{"type":"function_call_output","call_id":"call_abc","output":"Sunny, 25C"}]}`
+	w := doResponses(t, srv, "testtoken", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+}
+
+func TestResponsesRejected(t *testing.T) {
+	cfg := testMeterConfig(t)
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+	if srv.meter != nil {
+		defer srv.meter.Close()
+	}
+
+	cases := []struct {
+		name, body, wantType string
+		wantCode             int
+	}{
+		{"stream", `{"model":"chimera-chatgpt","input":"hi","stream":true}`, "streaming_unsupported", 400},
+		{"bad model", `{"model":"nope","input":"hi"}`, "model_not_found", 400},
+		{"empty", `{"model":"chimera-chatgpt"}`, "invalid_request", 400},
+		{"bad input", `{"model":"chimera-chatgpt","input":42}`, "invalid_request", 400},
+	}
+	for _, c := range cases {
+		w := doResponses(t, srv, "testtoken", c.body)
+		if w.Code != c.wantCode {
+			t.Fatalf("%s: status %d, want %d (%s)", c.name, w.Code, c.wantCode, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), c.wantType) {
+			t.Fatalf("%s: body missing %q: %s", c.name, c.wantType, w.Body.String())
+		}
+	}
+}
+
+func TestResponsesRecorded(t *testing.T) {
+	cfg := testMeterConfig(t)
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+	if srv.meter != nil {
+		defer srv.meter.Close()
+	}
+
+	if w := doResponses(t, srv, "testtoken", `{"model":"chimera-chatgpt","input":"hi"}`); w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	n, err := srv.meter.MonthCount("default", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("month count = %d, want 1 (shared pipeline records responses turns)", n)
 	}
 }

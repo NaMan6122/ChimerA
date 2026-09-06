@@ -747,7 +747,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if extractLastUserMessage(msgs) == "" && len(msgs) == 0 {
+	if len(msgs) == 0 {
 		telemetry.ObserveChatRequest("none", req.Model, "400")
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "input is required")
 		return
