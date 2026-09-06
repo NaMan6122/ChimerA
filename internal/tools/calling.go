@@ -4,12 +4,17 @@
 package tools
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/chimera/chimera/internal/models"
+	"github.com/chimera/chimera/internal/telemetry"
 )
 
 // ToolPromptForChatGPT is the system prompt injected for ChatGPT tool calling.
@@ -61,37 +66,104 @@ func BuildToolPrompt(tools []models.Tool, provider string) string {
 
 // ParseToolCalls attempts to extract tool calls from the LLM response text.
 // Uses a brace-depth tracker to handle nested JSON objects.
+// No name validation; see ParseToolCallsWithDefs for the validated path.
 func ParseToolCalls(text string) []models.ToolCall {
-	// Look for JSON block in markdown code fence or bare JSON
+	return ParseToolCallsWithDefs(text, nil, "")
+}
+
+// rawCall mirrors one emitted call; Arguments stays raw so non-object
+// values can be normalized to {} instead of failing the whole batch.
+type rawCall struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+// ParseToolCallsWithDefs extracts tool calls like ParseToolCalls, plus:
+//   - accepts the single-object shape {"name":..., "arguments":{...}} in
+//     addition to the {"tool_calls":[...]} envelope;
+//   - drops calls whose name is not in validNames (empty = keep all),
+//     counting rejects under provider ("" skips counting);
+//   - normalizes missing/non-object arguments to {};
+//   - assigns unique call_<hex> IDs.
+func ParseToolCallsWithDefs(text string, validNames []string, provider string) []models.ToolCall {
 	jsonStr := extractJSON(text)
 	if jsonStr == "" {
 		return nil
 	}
 
-	var parsed struct {
-		ToolCalls []struct {
-			Name      string                 `json:"name"`
-			Arguments map[string]interface{} `json:"arguments"`
-		} `json:"tool_calls"`
+	var raws []rawCall
+	var env struct {
+		ToolCalls []rawCall `json:"tool_calls"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &env); err != nil {
+		return nil
+	}
+	if len(env.ToolCalls) > 0 {
+		raws = env.ToolCalls
+	} else {
+		var single rawCall
+		if err := json.Unmarshal([]byte(jsonStr), &single); err != nil {
+			return nil
+		}
+		if single.Name == "" {
+			return nil
+		}
+		raws = []rawCall{single}
 	}
 
-	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
-		return nil
+	allowed := make(map[string]bool, len(validNames))
+	for _, n := range validNames {
+		allowed[n] = true
 	}
 
 	var calls []models.ToolCall
-	for i, tc := range parsed.ToolCalls {
-		argsBytes, _ := json.Marshal(tc.Arguments)
+	for _, rc := range raws {
+		if rc.Name == "" {
+			continue
+		}
+		if len(allowed) > 0 && !allowed[rc.Name] {
+			if provider != "" {
+				telemetry.ObserveToolNameReject(provider)
+			}
+			continue
+		}
+		args := normalizeArguments(rc.Arguments)
 		calls = append(calls, models.ToolCall{
-			ID:   fmt.Sprintf("call_%d", i+1),
+			ID:   newCallID(),
 			Type: "function",
 			Function: models.FunctionCall{
-				Name:      tc.Name,
-				Arguments: string(argsBytes),
+				Name:      rc.Name,
+				Arguments: args,
 			},
 		})
 	}
 	return calls
+}
+
+// normalizeArguments keeps JSON objects as-is (compacted) and maps
+// missing/non-object values to {} so one bad item never kills the batch.
+func normalizeArguments(raw json.RawMessage) string {
+	t := strings.TrimSpace(string(raw))
+	if t == "" {
+		return "{}"
+	}
+	if !strings.HasPrefix(t, "{") {
+		return "{}"
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, []byte(t)); err != nil {
+		return "{}"
+	}
+	return compact.String()
+}
+
+// newCallID returns a unique call_<12 hex> ID.
+func newCallID() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("call_%d", time.Now().UnixNano())
+	}
+	return "call_" + hex.EncodeToString(b[:])
 }
 
 // extractJSON finds the first JSON object in text, handling code fences.
