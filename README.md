@@ -6,6 +6,14 @@
 
 Port of [Chimera-Gateway](https://github.com/GautamVhavle/Chimera-Gateway) (Python + Patchright + FastAPI) to **Go + rod + chi** for a lightweight, static-binary, operationally cheap gateway.
 
+> **Product docs:** [`docs/PRD.md`](docs/PRD.md) (vision, users, pricing, roadmap) ·
+> [`docs/WEBSITE.md`](docs/WEBSITE.md) (website builder brief) ·
+> [`docs/SAAS.md`](docs/SAAS.md) (self-host vs managed).
+>
+> **Operator docs:** [`docs/API.md`](docs/API.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
+> [`docs/PROVIDERS.md`](docs/PROVIDERS.md) · [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) ·
+> [`docs/METERING.md`](docs/METERING.md). Planned work lives in [`specs/`](specs/).
+
 ```
 Your app (OpenAI SDK / LangChain / curl)
           │
@@ -32,7 +40,27 @@ See [`docs/TECH_STACK_DECISION.md`](docs/TECH_STACK_DECISION.md) for full compar
 | Gateway RAM (idle) | 85–120 MB | **18–30 MB** |
 | Image (gateway + Chromium) | ~650 MB | **~380–450 MB** |
 | Cold start | 900 ms | **60 ms** |
-| Concurrency | asyncio + GIL | goroutines + `sync.Mutex` (page pool future) |
+| Concurrency | asyncio + GIL | goroutines + per-provider locks (multi-tab pool) |
+
+---
+
+## Features
+
+- **OpenAI-compatible gateway** — `POST /v1/chat/completions` (JSON + emulated SSE
+  streaming), `GET /v1/models`, tool calling via prompt engineering, session
+  continuity (`X-Session-Id`), `POST /v1/refresh` for stale-DOM recovery.
+- **5 providers, one endpoint** — ChatGPT, Claude, Qwen, DeepSeek, Kimi; `PROVIDER=all`
+  runs them in a single Chromium with model-based routing (`chimera-*` IDs).
+- **Built for agents** — works as *the model* (`base_url` swap in any OpenAI client)
+  or, once [`specs/001`](specs/001-mcp-stdio-mode.md) lands, as *a tool* (MCP `chat`
+  inside Claude Code et al.). `/v1/responses` and Anthropic Messages shapes are specced.
+- **Observable scraping** — `/metrics` (request outcomes, round-trip histograms, error
+  reasons, lock waits, **selector-fallback radar**, echo retries), `/v1/health/providers`
+  login probes, JSON logs with request IDs, Grafana dashboard + alert rules.
+- **Billable** — per-tenant keys (`API_TOKENS`), SQLite usage ledger, monthly quotas
+  (429 `quota_exceeded`), `GET /v1/usage`.
+- **Honest hardening** — multi-key auth, CORS, body caps, lock timeouts (no infinite
+  hangs), long-prompt pre-flight guard, copy-button completion detection, echo recovery.
 
 ---
 
@@ -42,7 +70,7 @@ See [`docs/TECH_STACK_DECISION.md`](docs/TECH_STACK_DECISION.md) for full compar
 
 ```bash
 cp .env.example .env
-# edit .env: PROVIDER=chatgpt|claude|qwen|deepseek, API_TOKEN=chimera
+# edit .env: PROVIDER=chatgpt|claude|qwen|deepseek|kimi|all, API_TOKEN=chimera
 
 go build -o chimera ./cmd/chimera
 ./chimera
@@ -76,6 +104,20 @@ for chunk in client.chat.completions.create(model="chimera-chatgpt", messages=[{
         print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 
+### Two ways to use it with agents
+
+**1. As the model** — point any OpenAI-compatible client at Chimera and your
+subscription answers (zero token spend, access to models with no API):
+
+```python
+# opencode / LangChain / any OpenAI SDK: only base_url + api_key change
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="chimera")
+```
+
+**2. As a tool** (planned, [`specs/001`](specs/001-mcp-stdio-mode.md)) — keep your
+agent on API credits and escalate hard steps to your subscriptions via MCP `chat`,
+or let five subscriptions vote/fall back behind one tool call.
+
 ---
 
 ## Self-Host vs Managed (Open-Source SaaS)
@@ -106,10 +148,10 @@ All in `.env` + env (see `.env.example`):
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `PROVIDER` | `chatgpt` | `chatgpt`\|`claude`\|`qwen`\|`deepseek` |
+| `PROVIDER` | `chatgpt` | `chatgpt`\|`claude`\|`qwen`\|`deepseek`\|`kimi`\|`all` |
 | `BROWSER_DATA_DIR` | `./browser_data` | persistent profile parent (per-provider subdir) |
 | `HEADLESS` | `false` | headless Chromium |
-| `CHATGPT_URL` / `CLAUDE_URL` / `QWEN_URL` / `DEEPSEEK_URL` | vendor URLs | override for proxies |
+| `CHATGPT_URL` / `CLAUDE_URL` / `QWEN_URL` / `DEEPSEEK_URL` / `KIMI_URL` | vendor URLs | override for proxies |
 | `RESPONSE_TIMEOUT` | `120000` ms | max wait for streaming |
 | `SELECTOR_TIMEOUT` | `10000` ms | selector fallback timeout |
 | `API_HOST` / `API_PORT` | `0.0.0.0:8000` | listen |
@@ -130,11 +172,15 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for deep dive (browser lifecy
 ```
 cmd/chimera/main.go         entry + banner + graceful shutdown
 internal/config             env loader, per-provider BrowserDataPath
-internal/browser            rod manager (UserDataDir persistence, jittered viewport, lock cleanup), stealth patches, human behavior (random delays, InsertText, hover+click)
+internal/auth               credential → tenant registry (single + multi-key)
+internal/meter              SQLite usage ledger + monthly summaries
+internal/telemetry          Prometheus metrics + provider health state
+internal/browser            rod manager (UserDataDir persistence, jittered viewport, lock cleanup), pool (multi-tab), stealth patches, human behavior (random delays, InsertText, hover+click)
 internal/models             OpenAI-compatible schemas + ProviderResponse
 internal/tools              tool prompt injection (ChatGPT vs Claude phrasing) + brace-depth JSON parser
-internal/providers          Provider interface + Base (fallback find, wait, count, extract) + 4 clients (chatgpt/claude/qwen/deepseek) each with selectors.go
-internal/api                chi router, Bearer auth, rate limit, SSE streaming emulation, tool-call wiring, mutex-serialized browser access
+internal/providers          Provider interface + Base (fallback find, wait, count, extract) + 5 clients (chatgpt/claude/qwen/deepseek/kimi) each with selectors.go
+internal/session            X-Session-Id continuity with LRU tab eviction
+internal/api                chi router, multi-key auth, rate limit, SSE streaming emulation, tool-call wiring, quotas, usage, per-provider locks
 ```
 
 ---
@@ -163,6 +209,7 @@ See [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for metrics, alerts, and Gr
 | Claude | `chimera-claude` | `claude.ai` | full chat + tools (streaming via `data-is-streaming`) |
 | Qwen | `chimera-qwen` | `chat.qwen.ai` | full chat + stability fallback |
 | DeepSeek | `chimera-deepseek` | `chat.deepseek.com` | full chat + stability fallback |
+| Kimi | `chimera-kimi` | `kimi.com` | full chat + stability fallback |
 
 Adding a new provider: copy `qwen/` template, define fallback selector lists, register in `config` + `cmd/chimera/main.go:112`. See `docs/PROVIDERS.md`.
 
@@ -184,9 +231,12 @@ curl -H "Authorization: Bearer chimera" http://localhost:8000/v1/models
 Browser UIs lack native function-calling; Chimera does prompt engineering (same as Chimera):
 
 - `tools.BuildToolPrompt(provider)` injects signatures.
-- Model emits `{"tool_calls":[{"name":"…","arguments":{…}}]}` (code fence or bare JSON).
-- `tools.ParseToolCalls` extracts with brace-depth tracker → returned as `message.tool_calls` with `call_1` IDs.
-- Next turn: send `{"role":"tool","tool_call_id":"call_1","content":"…"}` → folded to `Tool result (call_1): …`.
+- Model emits `{"tool_calls":[{"name":"…","arguments":{…}}]}` (code fence or bare JSON;
+  a lone `{"name":"…","arguments":{…}}` object is accepted too).
+- `tools.ParseToolCallsWithDefs` extracts with brace-depth tracker, drops names that
+  weren't requested (counted as `chimera_tool_name_reject_total`), normalizes bad
+  arguments to `{}`, and assigns unique `call_<hex>` IDs.
+- Next turn: send `{"role":"tool","tool_call_id":"call_…","content":"…"}` → folded to `Tool result (call_…): …`.
 
 ---
 
@@ -195,18 +245,46 @@ Browser UIs lack native function-calling; Chimera does prompt engineering (same 
 ```bash
 go vet ./... && go build ./...          # health
 go run ./cmd/chimera                    # headful run
-go test ./internal/tools -v             # tool parser tests (add)
+go test ./...                           # full suite (mock-backed, no browser needed)
 ```
+
+---
+
+## FAQ
+
+**Why is it slow?** Every turn drives a real Chromium tab: 5–30s. Chimera is for
+reasoning steps and async agents, not autocomplete-speed loops. Repeats get faster
+once the response cache ([`specs/008`](specs/008-response-cache.md)) lands.
+
+**Will my account get banned?** Browser automation can trigger CAPTCHAs, rate limits,
+or bans. Mitigations: headful mode, human-behavior pacing, persistent profiles, and
+(soon) caching to reduce page loads. Use accounts you can afford to verify.
+
+**Why not just use the official APIs?** If per-token pricing works for you, use it —
+it's faster and supported. Chimera is for killing a second bill, reaching models with
+no API, and keeping prompts in your own browser profile.
+
+**Does it do vision / files / image gen?** Not yet — multimodal parts are parsed but
+only text is sent today. Wiring uploads is tracked post-v1.
+
+**How do tool calls work without an API?** Prompt engineering: signatures are injected
+into the system prompt, the model emits JSON, a brace-depth parser extracts it
+(`internal/tools`). Reliable for 1–7 tools; hallucinations are filtered once
+[`specs/004`](specs/004-tool-call-hardening.md) lands.
+
+**How is this different from the Python Chimera-Gateway?** Same idea, Go runtime:
+18MB static binary, 60ms cold start, ~1/4 the RAM, plus metering, per-tenant quotas,
+and Prometheus observability the Python project doesn't ship.
 
 ---
 
 ## Limitations
 
 - 5–30s latency (real browser)
-- Sessions expire → re-login via browser window
-- Selectors brittle → only `selectors.go` needs edit on vendor UI change
+- Sessions expire → re-login via browser window or VNC
+- Selectors brittle → fallback radar alerts; only `selectors.go` needs edit on vendor UI change (config packs planned: [`specs/006`](specs/006-selector-packs.md))
 - Tool calling reliable for 1–7 tools via prompting
-- Single page → serialized via `sync.Mutex` (Chimera's `BrowserPagePool` multi-tab is roadmap)
+- Per-provider serialization via locks; cross-provider failover planned ([`specs/005`](specs/005-cross-provider-failover.md))
 
 ---
 
