@@ -202,6 +202,7 @@ func (s *Server) setupRoutes() {
 		r.Get("/health/providers", s.handleProvidersHealth)
 		r.Get("/usage", s.handleUsage)
 		r.Post("/chat/completions", s.handleChatCompletions)
+		r.Post("/responses", s.handleResponses)
 		r.Post("/refresh", s.handleRefresh)
 		r.Get("/refresh", s.handleRefresh)
 		r.Post("/new_chat", s.handleRefresh)
@@ -549,6 +550,46 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// doProviderTurn runs one serialized provider attempt: lock with timeout,
+// SendMessage, telemetry, usage recording, and session-URL persistence.
+// Shared by chat and responses handlers so outcomes can never drift.
+// Returns the assistant text on success (code 200); otherwise the HTTP
+// code + error type/message for writeJSONError.
+func (s *Server) doProviderTurn(r *http.Request, alog *logging.Logger, provider providers.Provider, mu *sync.Mutex, providerName, model, tenant, prompt, threadID, sessionID string) (string, int, string, string) {
+	if mu == nil {
+		mu = &s.mu
+	}
+	lockStart := time.Now()
+	if !acquireProviderLock(r.Context(), mu, s.cfg.ResponseTimeout+30*time.Second) {
+		telemetry.ObserveLockWait(providerName, time.Since(lockStart))
+		telemetry.ObserveProviderError(providerName, "lock_timeout")
+		if r.Context().Err() != nil {
+			telemetry.ObserveChatRequest(providerName, model, "499")
+			return "", 499, "client_closed", "client disconnected while waiting for provider lock"
+		}
+		telemetry.ObserveChatRequest(providerName, model, "504")
+		s.recordUsage(tenant, providerName, model, false, len(prompt), 0, time.Since(lockStart), 504)
+		return "", http.StatusGatewayTimeout, "provider_busy", "provider busy, try again later"
+	}
+	telemetry.ObserveLockWait(providerName, time.Since(lockStart))
+	sendStart := time.Now()
+	resp, err := provider.SendMessage(prompt, threadID)
+	mu.Unlock()
+	telemetry.ObserveResponseDuration(providerName, false, time.Since(sendStart))
+	if err != nil {
+		alog.Errorf("Provider %s error: %v", providerName, err)
+		telemetry.ObserveProviderError(providerName, "send_error")
+		telemetry.ObserveChatRequest(providerName, model, "500")
+		s.recordUsage(tenant, providerName, model, false, len(prompt), 0, time.Since(sendStart), 500)
+		return "", http.StatusInternalServerError, "provider_error", fmt.Sprintf("provider error: %v", err)
+	}
+	telemetry.RecordSuccess(providerName)
+	telemetry.ObserveChatRequest(providerName, model, "200")
+	s.recordUsage(tenant, providerName, model, false, len(prompt), len(resp.Message), time.Since(sendStart), 200)
+	s.saveSessionURL(sessionID, provider)
+	return resp.Message, http.StatusOK, "", ""
+}
+
 // handleChatCompletions handles OpenAI-compatible chat completions.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	alog := log_.WithRequestID(middleware.GetReqID(r.Context()))
@@ -640,43 +681,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Non-streaming — per-provider serialized with timeout (no infinite hang)
-	lockStart := time.Now()
-	if !acquireProviderLock(r.Context(), mu, s.cfg.ResponseTimeout+30*time.Second) {
-		telemetry.ObserveLockWait(providerName, time.Since(lockStart))
-		telemetry.ObserveProviderError(providerName, "lock_timeout")
-		if r.Context().Err() != nil {
-			telemetry.ObserveChatRequest(providerName, req.Model, "499")
-			writeJSONError(w, 499, "client_closed", "client disconnected while waiting for provider lock")
-		} else {
-			telemetry.ObserveChatRequest(providerName, req.Model, "504")
-			s.recordUsage(tenant, providerName, req.Model, false, len(prompt), 0, time.Since(lockStart), 504)
-			writeJSONError(w, http.StatusGatewayTimeout, "provider_busy", "provider busy, try again later")
-		}
+	// Non-streaming — per-provider serialized with timeout (no infinite hang).
+	text, code, errType, errMsg := s.doProviderTurn(r, alog, provider, mu, providerName, req.Model, tenant, prompt, threadID, sessionID)
+	if code != http.StatusOK {
+		writeJSONError(w, code, errType, errMsg)
 		return
 	}
-	telemetry.ObserveLockWait(providerName, time.Since(lockStart))
-	sendStart := time.Now()
-	resp, err := provider.SendMessage(prompt, threadID)
-	mu.Unlock()
-	telemetry.ObserveResponseDuration(providerName, false, time.Since(sendStart))
-	if err != nil {
-		alog.Errorf("Provider %s error: %v", providerName, err)
-		telemetry.ObserveProviderError(providerName, "send_error")
-		telemetry.ObserveChatRequest(providerName, req.Model, "500")
-		s.recordUsage(tenant, providerName, req.Model, false, len(prompt), 0, time.Since(sendStart), 500)
-		writeJSONError(w, http.StatusInternalServerError, "provider_error", fmt.Sprintf("provider error: %v", err))
-		return
-	}
-	telemetry.RecordSuccess(providerName)
-	telemetry.ObserveChatRequest(providerName, req.Model, "200")
-	s.recordUsage(tenant, providerName, req.Model, false, len(prompt), len(resp.Message), time.Since(sendStart), 200)
-	s.saveSessionURL(sessionID, provider)
 
-	// Parse tool calls from response
+	// Parse tool calls from response (validated against requested names).
 	var toolCalls []models.ToolCall
 	if len(req.Tools) > 0 {
-		toolCalls = parseToolCallsIfPresent(resp.Message, req.Tools)
+		toolCalls = parseToolCallsIfPresent(text, req.Tools, providerName)
 	}
 
 	completion := models.ChatCompletionResponse{
@@ -689,7 +704,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				Index: 0,
 				Message: models.ResponseMsg{
 					Role:      "assistant",
-					Content:   resp.Message,
+					Content:   text,
 					ToolCalls: toolCalls,
 				},
 				FinishReason: determineFinishReason(toolCalls),
@@ -697,13 +712,139 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		},
 		Usage: models.Usage{
 			PromptTokens:     estimateTokens(prompt),
-			CompletionTokens: estimateTokens(resp.Message),
-			TotalTokens:      estimateTokens(prompt) + estimateTokens(resp.Message),
+			CompletionTokens: estimateTokens(text),
+			TotalTokens:      estimateTokens(prompt) + estimateTokens(text),
 		},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(completion)
+}
+
+// handleResponses handles OpenAI-compatible /v1/responses requests.
+// Translates to the chat pipeline (same provider resolution, guards, quota,
+// locks, telemetry, metering) and shapes the turn as a ResponseObject.
+// Streaming is rejected: SSE event mapping is a follow-up, not silent emulation.
+func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
+	alog := log_.WithRequestID(middleware.GetReqID(r.Context()))
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	var req models.ResponsesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		telemetry.ObserveChatRequest("none", "", "400")
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+
+	if req.Stream {
+		telemetry.ObserveChatRequest("none", req.Model, "400")
+		writeJSONError(w, http.StatusBadRequest, "streaming_unsupported", "streaming responses are not supported yet, retry with stream:false")
+		return
+	}
+
+	msgs, err := req.ToChatMessages()
+	if err != nil {
+		telemetry.ObserveChatRequest("none", req.Model, "400")
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if extractLastUserMessage(msgs) == "" && len(msgs) == 0 {
+		telemetry.ObserveChatRequest("none", req.Model, "400")
+		writeJSONError(w, http.StatusBadRequest, "invalid_request", "input is required")
+		return
+	}
+
+	alog.Infof("Responses request (model=%s, messages=%d)", req.Model, len(msgs))
+
+	provider, mu, providerName := s.providerForModel(req.Model)
+	if provider == nil {
+		telemetry.ObserveChatRequest("none", req.Model, "400")
+		writeJSONError(w, http.StatusBadRequest, "model_not_found", "no provider available for model "+req.Model)
+		return
+	}
+
+	chatTools := req.ToChatTools()
+	threadID := extractThreadID(msgs)
+	promptProvider := providerName
+	if promptProvider == "" {
+		promptProvider = s.cfg.Provider
+	}
+	prompt := buildPrompt(msgs, chatTools, promptProvider)
+
+	sessionID := extractSessionID(r, req.User)
+	if sessionID != "" {
+		if len(msgs) > 2 {
+			if pruned := buildPrunedPrompt(msgs, chatTools, providerName); pruned != "" {
+				prompt = pruned
+			}
+		}
+		threadID = sessionID
+	}
+
+	maxChars := s.cfg.MaxPromptChars
+	if maxChars <= 0 {
+		maxChars = 12000
+	}
+	if len(prompt) > maxChars {
+		alog.Warnf("Pre-flight reject: prompt %d chars exceeds %d", len(prompt), maxChars)
+		telemetry.ObserveChatRequest(providerName, req.Model, "400")
+		writeJSONError(w, http.StatusBadRequest, "message_too_long", fmt.Sprintf("Prompt exceeds %d chars, send button will be disabled. Split or shorten.", maxChars))
+		return
+	}
+
+	tenant := s.tenantOf(r)
+	if s.quotaExceeded(tenant) {
+		alog.Warnf("Quota exceeded for tenant %q", tenant)
+		telemetry.ObserveChatRequest(providerName, req.Model, "429")
+		writeJSONError(w, http.StatusTooManyRequests, "quota_exceeded", "monthly request quota exceeded, upgrade or wait for reset")
+		return
+	}
+
+	text, code, errType, errMsg := s.doProviderTurn(r, alog, provider, mu, providerName, req.Model, tenant, prompt, threadID, sessionID)
+	if code != http.StatusOK {
+		writeJSONError(w, code, errType, errMsg)
+		return
+	}
+
+	var toolCalls []models.ToolCall
+	if len(chatTools) > 0 {
+		toolCalls = parseToolCallsIfPresent(text, chatTools, providerName)
+	}
+
+	output := make([]models.ResponseOutputItem, 0, len(toolCalls)+1)
+	for _, tc := range toolCalls {
+		output = append(output, models.ResponseOutputItem{
+			Type:      "function_call",
+			CallID:    tc.ID,
+			Name:      tc.Function.Name,
+			Arguments: tc.Function.Arguments,
+		})
+	}
+	if len(toolCalls) == 0 {
+		output = append(output, models.ResponseOutputItem{
+			Type:    "message",
+			Role:    "assistant",
+			Content: []models.ResponseOutputContent{{Type: "output_text", Text: text}},
+		})
+	}
+
+	promptTokens := estimateTokens(prompt)
+	completionTokens := estimateTokens(text)
+	respObj := models.ResponseObject{
+		ID:      models.NewResponseObjectID(),
+		Object:  "response",
+		Created: time.Now().Unix(),
+		Model:   provider.ModelID(),
+		Status:  "completed",
+		Output:  output,
+		Usage: models.ResponsesUsage{
+			InputTokens:  promptTokens,
+			OutputTokens: completionTokens,
+			TotalTokens:  promptTokens + completionTokens,
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(respObj)
 }
 
 // saveSessionURL persists the conversation URL for X-Session-Id continuity.
@@ -915,12 +1056,17 @@ func buildPrompt(messages []models.ChatMessage, toolDefs []models.Tool, provider
 }
 
 // parseToolCallsIfPresent checks if the response contains tool calls.
-// Delegates to internal/tools.ParseToolCalls which uses brace-depth tracking.
-func parseToolCallsIfPresent(text string, toolDefs []models.Tool) []models.ToolCall {
+// Delegates to internal/tools, validating names against the requested defs so
+// hallucinated function names never reach the client.
+func parseToolCallsIfPresent(text string, toolDefs []models.Tool, provider string) []models.ToolCall {
 	if len(toolDefs) == 0 {
 		return nil
 	}
-	return tools.ParseToolCalls(text)
+	valid := make([]string, 0, len(toolDefs))
+	for _, t := range toolDefs {
+		valid = append(valid, t.Function.Name)
+	}
+	return tools.ParseToolCallsWithDefs(text, valid, provider)
 }
 
 func trimNonJSON(text string) string {

@@ -49,6 +49,7 @@ type Metrics struct {
 	LockWait         *prometheus.HistogramVec
 	SelectorFallback *prometheus.CounterVec
 	EchoRetry        *prometheus.CounterVec
+	ToolNameReject   *prometheus.CounterVec
 	HTTPRequests     *prometheus.CounterVec
 	HTTPDuration     *prometheus.HistogramVec
 	ProviderUp       *prometheus.GaugeVec
@@ -92,6 +93,10 @@ func New() *Metrics {
 		Name: "chimera_echo_retry_total",
 		Help: "Echo-detection re-extractions (response contained the prompt).",
 	}, []string{"provider"})
+	m.ToolNameReject = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "chimera_tool_name_reject_total",
+		Help: "Tool calls dropped because the name was not requested.",
+	}, []string{"provider"})
 	m.HTTPRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "chimera_http_requests_total",
 		Help: "HTTP responses by method, path and code.",
@@ -111,7 +116,7 @@ func New() *Metrics {
 	}, []string{"provider"})
 	m.reg.MustRegister(
 		m.ChatRequests, m.ResponseDuration, m.ProviderErrors, m.LockWait,
-		m.SelectorFallback, m.EchoRetry, m.HTTPRequests, m.HTTPDuration,
+		m.SelectorFallback, m.EchoRetry, m.ToolNameReject, m.HTTPRequests, m.HTTPDuration,
 		m.ProviderUp, m.ProviderLastOK,
 	)
 	return m
@@ -204,6 +209,14 @@ func ObserveSelectorFallback(provider string) {
 // ObserveEchoRetry counts an echo-detection re-extraction.
 func ObserveEchoRetry(provider string) {
 	Default.EchoRetry.WithLabelValues(provider).Inc()
+}
+
+// ObserveToolNameReject counts a dropped hallucinated tool name (skipped when provider is "").
+func ObserveToolNameReject(provider string) {
+	if provider == "" {
+		return
+	}
+	Default.ToolNameReject.WithLabelValues(provider).Inc()
 }
 
 // ObserveHTTP records one HTTP response.
