@@ -33,8 +33,10 @@ same auth/rate-limit/meter middleware as chat):
 4. Parse tool calls via hardened parser (spec 004). Any calls → `output` gets
    `function_call` items and top-level `status:"completed"` (matching OpenAI's
    `incomplete_details`-free success shape); plain text → message item only.
-5. Errors reuse existing `type` strings (`model_not_found`, `message_too_long`,
-   `quota_exceeded`, `provider_busy`, `provider_error`).
+5. Errors reuse existing `type` strings (`invalid_request`, `message_too_long`,
+   `quota_exceeded`, `provider_busy`, `provider_error`). Unknown `model` values
+   fall back to the default provider exactly like chat (documented, tested) —
+   there is no `model_not_found` on this endpoint in single/pooled mode.
 
 ## Files
 
@@ -47,6 +49,7 @@ same auth/rate-limit/meter middleware as chat):
 
 - Text turn returns `output[0].type=="message"` with echoed mock text; usage present.
 - `trigger_tool`-style reply returns a `function_call` item with valid JSON `arguments`.
-- `stream:true` → 400 `streaming_unsupported`; unknown model → 400 `model_not_found`.
+- `stream:true` → 400 `streaming_unsupported`; unknown model → default-provider
+  fallback (chat parity).
 - Quota/metering behave identically to chat (counter +1 per attempt).
 - `go vet ./... && go test ./internal/api/`.

@@ -195,6 +195,7 @@ See [`docs/API.md`](docs/API.md). OpenAI-compatible:
 - `GET /v1/usage?from&to` (per-tenant usage; callers see only their tenant)
 - `GET /v1/models`
 - `POST /v1/chat/completions` (non-stream + `stream:true` SSE + tools)
+- `POST /v1/responses` (Codex-style; `stream:true` rejected for now)
 - Auth via `Authorization: Bearer <API_TOKEN>`, `x-api-key`, `anthropic-api-key`.
 
 See [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for metrics, alerts, and Grafana dashboard.

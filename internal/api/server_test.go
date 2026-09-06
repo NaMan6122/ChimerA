@@ -527,7 +527,6 @@ func TestResponsesRejected(t *testing.T) {
 		wantCode             int
 	}{
 		{"stream", `{"model":"chimera-chatgpt","input":"hi","stream":true}`, "streaming_unsupported", 400},
-		{"bad model", `{"model":"nope","input":"hi"}`, "model_not_found", 400},
 		{"empty", `{"model":"chimera-chatgpt"}`, "invalid_request", 400},
 		{"bad input", `{"model":"chimera-chatgpt","input":42}`, "invalid_request", 400},
 	}
@@ -539,6 +538,19 @@ func TestResponsesRejected(t *testing.T) {
 		if !strings.Contains(w.Body.String(), c.wantType) {
 			t.Fatalf("%s: body missing %q: %s", c.name, c.wantType, w.Body.String())
 		}
+	}
+
+	// Unknown models fall back to the default provider (same as chat).
+	w := doResponses(t, srv, "testtoken", `{"model":"nope","input":"hi"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unknown model: status %d, want 200 fallback (%s)", w.Code, w.Body.String())
+	}
+	var fb models.ResponseObject
+	if err := json.Unmarshal(w.Body.Bytes(), &fb); err != nil {
+		t.Fatal(err)
+	}
+	if fb.Model != "chimera-chatgpt" {
+		t.Fatalf("fallback model = %q, want chimera-chatgpt", fb.Model)
 	}
 }
 
