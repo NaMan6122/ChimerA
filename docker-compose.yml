@@ -15,6 +15,6 @@ services:
       - API_TOKEN=${API_TOKEN:-chimera}
       - API_PORT=8000
       - HEADLESS=false
-      - VNC_PASSWORD=${VNC_PASSWORD:-chimera}
+      - VNC_PASSWORD=${VNC_PASSWORD:-}
     restart: unless-stopped
     shm_size: 2gb
