@@ -34,15 +34,15 @@ var log_ = logging.New("api", "./logs", "debug", true)
 type Server struct {
 	cfg        *config.Config
 	router     *chi.Mux
-	provider   providers.Provider             // single-provider mode (legacy)
+	provider   providers.Provider            // single-provider mode (legacy)
 	providers  map[string]providers.Provider // pooled mode: provider name -> Provider
 	mus        map[string]*sync.Mutex        // pooled mode: per-provider mutex
-	sessionMgr *session.Manager               // X-Session-Id continuity
-	browser    *rod.Browser                   // for session pages
+	sessionMgr *session.Manager              // X-Session-Id continuity
+	browser    *rod.Browser                  // for session pages
 	limiter    *rate.Limiter
 	keys       *auth.Keys   // credential -> tenant registry
 	meter      *meter.Store // usage recording, nil when METER_DB=""
-	mu         sync.Mutex // serializes browser access for single mode
+	mu         sync.Mutex   // serializes browser access for single mode
 }
 
 // keysForConfig returns the parsed registry, building one from raw tokens
@@ -571,16 +571,16 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"object":          "usage",
-		"tenant":          tenant,
-		"from":            from.Format(time.RFC3339),
-		"to":              to.Format(time.RFC3339),
-		"requests":        u.Requests,
-		"prompt_chars":    u.PromptChars,
+		"object":           "usage",
+		"tenant":           tenant,
+		"from":             from.Format(time.RFC3339),
+		"to":               to.Format(time.RFC3339),
+		"requests":         u.Requests,
+		"prompt_chars":     u.PromptChars,
 		"completion_chars": u.CompletionChars,
-		"errors":          u.Errors,
-		"by_provider":     u.ByProvider,
-		"quota_monthly":   limit,
+		"errors":           u.Errors,
+		"by_provider":      u.ByProvider,
+		"quota_monthly":    limit,
 	})
 }
 
@@ -1225,9 +1225,9 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	log_.Infof("Refresh succeeded for %s in %v", providerName, elapsed)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":   "ok",
-		"provider": providerName,
-		"model":    provider.ModelID(),
+		"status":     "ok",
+		"provider":   providerName,
+		"model":      provider.ModelID(),
 		"elapsed_ms": elapsed.Milliseconds(),
 	})
 }
