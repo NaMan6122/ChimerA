@@ -345,6 +345,11 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 }
 
 // statusRecorder captures the response code for metrics.
+//
+// It must forward the optional interfaces of the wrapped writer (Flush, Unwrap):
+// embedding http.ResponseWriter only promotes its three methods, so without
+// Flush() the SSE handler's http.Flusher assertion fails and every
+// stream:true request returns 500.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -354,6 +359,16 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
 }
+
+// Flush forwards to the underlying writer so SSE streaming survives middleware.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the wrapped writer for http.ResponseController.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // metricsMiddleware records per-request HTTP metrics.
 func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
