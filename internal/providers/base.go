@@ -183,6 +183,60 @@ func (b *Base) IsSendDisabled(sendSelectors []string) bool {
 	return false
 }
 
+// FindSendButton tries the selector list, then falls back to locating a button
+// inside the chat-input container (Qwen/DeepSeek Ant-Design UIs render a plain
+// ant-btn with only an SVG arrow — no aria-label — so static lists miss it).
+func (b *Base) FindSendButton(sendSelectors []string, chatInputSelectors []string) (*rod.Element, error) {
+	if el, err := b.FindElement(sendSelectors, 5*time.Second); err == nil {
+		return el, nil
+	}
+	// Container fallback: button nearest to the textarea
+	res, err := b.Page.Eval(`(inputSels) => {
+		let ta = null;
+		for (const s of inputSels) {
+			ta = document.querySelector(s);
+			if (ta) break;
+		}
+		if (!ta) return '';
+		// Walk up to 5 levels looking for a container with a button
+		let node = ta;
+		for (let i = 0; i < 5 && node; i++) {
+			const btns = node.parentElement ? node.parentElement.querySelectorAll('button') : [];
+			for (const btn of btns) {
+				const r = btn.getBoundingClientRect();
+				if (r.width > 0 && r.height > 0) {
+					// Mark it so Go can fetch it
+					btn.setAttribute('data-chimera-send', '1');
+					return btn.outerHTML.slice(0, 300);
+				}
+			}
+			node = node.parentElement;
+		}
+		return '';
+	}`, chatInputSelectors)
+	if err == nil && res.Value.Str() != "" {
+		if el, err := b.Page.Timeout(3 * time.Second).Element(`button[data-chimera-send="1"]`); err == nil {
+			return el, nil
+		}
+	}
+	return nil, fmt.Errorf("no send button found")
+}
+
+// InputValueLength returns the current length of the focused chat input
+// (textarea value or contenteditable innerText). Used to fail fast when
+// React didn't accept our insertion instead of hanging 2m in WaitForResponse.
+func (b *Base) InputValueLength() int {
+	res, err := b.Page.Eval(`() => {
+		const el = document.activeElement;
+		if (!el) return 0;
+		const v = el.isContentEditable ? (el.innerText || '') : (el.value || '');
+		return v.length;
+	}`)
+	if err != nil {
+		return -1
+	}
+	return res.Value.Int()
+}
 // CountAssistantMessages counts the number of assistant messages on the page.
 func (b *Base) CountAssistantMessages(selector string) (int, error) {
 	// Use double quotes to wrap selector so single quotes inside (e.g., [role='assistant']) don't break JS

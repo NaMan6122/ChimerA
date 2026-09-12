@@ -76,12 +76,33 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 		return nil, fmt.Errorf("typing message: %w", err)
 	}
 
+	// Fail fast if React didn't accept the insertion (empty textarea =
+	// send button stays hidden, Enter does nothing, 2m hang follows).
+	time.Sleep(500 * time.Millisecond)
+	if n := c.InputValueLength(); n < len(text)/2 {
+		c.Log.Warnf("Input verification failed: textarea holds %d chars, want ~%d — retrying once", n, len(text))
+		time.Sleep(300 * time.Millisecond)
+		if err := c.Human.InsertText(text); err != nil {
+			return nil, fmt.Errorf("typing message (retry): %w", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		if n2 := c.InputValueLength(); n2 < len(text)/2 {
+			return nil, fmt.Errorf("chat input rejected text (holds %d chars, want ~%d) — React state not updated", n2, len(text))
+		}
+	}
+
 	c.RandomDelay()
 
-	sendBtn, err := c.FindElement(SendButton, 5*time.Second)
+	sendBtn, err := c.FindSendButton(SendButton, ChatInput)
 	if err != nil {
 		c.Log.Warn("Send button not found, pressing Enter")
 		_ = c.Page.Keyboard.Press('\r')
+		// Ctrl+Enter fallback — some Ant-Design inputs submit on Cmd/Ctrl+Enter
+		time.Sleep(500 * time.Millisecond)
+		if n := c.InputValueLength(); n >= len(text)/2 {
+			c.Log.Warn("Enter didn't submit (input still full), trying Ctrl+Enter")
+			_ = c.Page.Keyboard.Press('\r')
+		}
 	} else {
 		if err := c.Human.Click(sendBtn); err != nil {
 			c.Log.Warn("Click failed, pressing Enter")

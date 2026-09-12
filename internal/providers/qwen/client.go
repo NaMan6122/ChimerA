@@ -59,6 +59,7 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 	c.Log.Infof("Sending message (thread=%s, len=%d)", threadID, len(text))
 
 	preCount, _ := c.CountAssistantMessages(AssistantMessage[0])
+	_ = preCount // baseline for future copy-button gating; wait uses stop/stability today
 
 	c.RandomDelay()
 
@@ -76,20 +77,45 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 		return nil, fmt.Errorf("typing message: %w", err)
 	}
 
-	c.RandomDelay()
-
-	sendBtn, err := c.FindElement(SendButton, 5*time.Second)
-	if err != nil {
-		c.Log.Warn("Send button not found, pressing Enter")
-		_ = c.Page.Keyboard.Press('\r')
-	} else {
-		if err := c.Human.Click(sendBtn); err != nil {
-			c.Log.Warn("Click failed, pressing Enter")
-			_ = c.Page.Keyboard.Press('\r')
+	// Fail fast if React didn't accept the insertion (empty textarea =
+	// send button stays hidden, Enter does nothing, 2m hang follows).
+	time.Sleep(500 * time.Millisecond)
+	if n := c.InputValueLength(); n < len(text)/2 {
+		c.Log.Warnf("Input verification failed: textarea holds %d chars, want ~%d — retrying once", n, len(text))
+		time.Sleep(300 * time.Millisecond)
+		if err := c.Human.InsertText(text); err != nil {
+			return nil, fmt.Errorf("typing message (retry): %w", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		if n2 := c.InputValueLength(); n2 < len(text)/2 {
+			return nil, fmt.Errorf("chat input rejected text (holds %d chars, want ~%d) — React state not updated", n2, len(text))
 		}
 	}
 
-	// Wait for response — copy button primary (avoids truncation), then stop button, then text stability
+	c.RandomDelay()
+
+	sendBtn, err := c.FindSendButton(SendButton, ChatInput)
+	if err != nil {
+		c.Log.Warn("Send button not found, pressing Enter")
+		_ = c.Page.Keyboard.Press('\r')
+		// Ctrl+Enter fallback — some Ant-Design inputs submit on Cmd/Ctrl+Enter
+		time.Sleep(500 * time.Millisecond)
+		if n := c.InputValueLength(); n >= len(text)/2 {
+			c.Log.Warn("Enter didn't submit (input still full), trying Ctrl+Enter")
+			_ = c.Page.Keyboard.Press('\r')
+		}
+	} else {
+		if err := c.Human.Click(sendBtn); err != nil {
+			c.Log.Warnf("Click failed (%v), pressing Enter", err)
+			_ = c.Page.Keyboard.Press('\r')
+		} else {
+			c.Log.Debugf("Send button clicked")
+		}
+	}
+
+	// Wait for response — stop-button lifecycle primary, text stability fallback.
+	// (Copy-button primary disabled: pre-existing UI copy buttons cause instant
+	// false positives and 1s-early extraction with empty assistant selectors.)
 	// Early disabled/error check (upstream #17)
 	if c.IsSendDisabled(SendButton) {
 		if msg, ok := c.HasErrorBanner(); ok {
@@ -97,9 +123,7 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 		}
 		return nil, fmt.Errorf("send button disabled (message too long or rate limited)")
 	}
-	if err := c.WaitForCopyButton(CopyButton, preCount); err == nil {
-		c.Log.Debugf("Copy button detected for msg %d", preCount)
-	} else if err := c.WaitForResponse(StopButton); err != nil {
+	if err := c.WaitForResponse(StopButton); err != nil {
 		// Fallback: text stability detection
 		c.Log.Warnf("Stop button detection failed: %v, trying text stability", err)
 		if err := c.waitForTextStability(); err != nil {
@@ -111,6 +135,7 @@ func (c *Client) SendMessage(text string, threadID string) (*models.ProviderResp
 
 	responseText, err := c.ExtractLastResponseText(AssistantMessage)
 	if err != nil {
+		c.dumpResponseDebug()
 		return nil, fmt.Errorf("extracting response: %w", err)
 	}
 
@@ -192,6 +217,42 @@ func (c *Client) ExtractResponse() (string, error) {
 // IsLoggedIn checks if the user is logged into Qwen.
 func (c *Client) IsLoggedIn() (bool, error) {
 	return c.Base.IsLoggedIn(LoginIndicators())
+}
+
+// dumpResponseDebug logs live DOM clues when extraction fails (temporary diagnostic,
+// runs inside the gateway's own rod connection — safe, no external attach).
+func (c *Client) dumpResponseDebug() {
+	if res, err := c.Page.Eval(`() => document.body.innerText.slice(0, 800)`); err == nil {
+		c.Log.Warnf("DEBUG body head: %q", res.Value.Str())
+	}
+	if res, err := c.Page.Eval(`() => {
+		const sels = ["div[data-role='assistant']", "div[class*='message-assistant']", "div[class*='bot-message']", "div[class*='assistant']", "[data-message-author-role='assistant']", "[class*='ai-message']", "[class*='qwen-response']", "[class*='answer']", "div[class*='message']"];
+		const out = {};
+		for (const s of sels) { try { out[s] = document.querySelectorAll(s).length; } catch(e) { out[s] = -1; } }
+		return JSON.stringify(out);
+	}`); err == nil {
+		c.Log.Warnf("DEBUG assistant counts: %s", res.Value.Str())
+	}
+	if res, err := c.Page.Eval(`() => {
+		const all = Array.from(document.querySelectorAll('div'));
+		const cands = [];
+		for (const el of all) {
+			const t = (el.innerText || '');
+			if (t.length > 20 && t.length < 800 && el.children.length <= 6) {
+				const cls = (typeof el.className === 'string' ? el.className : String(el.className)).slice(0, 150);
+				if (/message|assistant|answer|response|bubble|markdown|prose|content/i.test(cls)) {
+					cands.push(cls + ' | kids=' + el.children.length + ' | ' + t.slice(0, 80).replace(/\n/g, ' '));
+					if (cands.length >= 15) break;
+				}
+			}
+		}
+		return JSON.stringify(cands);
+	}`); err == nil {
+		c.Log.Warnf("DEBUG message cands: %s", res.Value.Str())
+	}
+	if res, err := c.Page.Eval(`() => document.URL`); err == nil {
+		c.Log.Warnf("DEBUG url: %s", res.Value.Str())
+	}
 }
 
 func (c *Client) isEcho(userMessage string) bool {
