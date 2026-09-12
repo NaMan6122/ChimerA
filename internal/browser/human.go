@@ -53,6 +53,11 @@ func (h *HumanBehavior) TypeText(text string) error {
 // TypeTextFast pastes text as a whole via JavaScript (no per-char delay).
 // For large prompts (>200 chars, e.g., JSON tool calls) it uses ClipboardEvent paste
 // which is O(1) vs execCommand O(n) that freezes — see upstream #23.
+//
+// React textarea fix (Qwen/DeepSeek/Kimi): plain `el.value += text` + Event('input')
+// does NOT update React's internal value tracker, so the send button never appears
+// and Enter does nothing. We must use the native value setter + InputEvent with
+// bubbles, reset _valueTracker, and verify value length afterwards.
 func (h *HumanBehavior) TypeTextFast(text string) error {
 	// Clear stale input first (selectAll + delete) — mirrors reference human_type
 	_, _ = h.page.Eval(`() => {
@@ -63,6 +68,39 @@ func (h *HumanBehavior) TypeTextFast(text string) error {
 		}
 	}`)
 	time.Sleep(50 * time.Millisecond)
+
+	// Small/medium prompts: try execCommand insertText first — it fires
+	// beforeinput/input with inputType=insertText which React listens to.
+	// This matches manual paste behavior most closely.
+	if len(text) <= 2000 {
+		_, err := h.page.Eval(`(text) => {
+			const el = document.activeElement;
+			if (!el) return 'no-element';
+			el.focus();
+			// execCommand works for both contenteditable and textarea when focused
+			try {
+				const ok = document.execCommand('insertText', false, text);
+				if (ok) {
+					const v = el.isContentEditable ? (el.innerText || '') : (el.value || '');
+					if (v.length >= text.length / 2) return 'ok-exec';
+				}
+			} catch(e) {}
+			return 'exec-failed';
+		}`, text)
+		if err == nil {
+			// Verify insertion actually stuck
+			verify, verr := h.page.Eval(`(text) => {
+				const el = document.activeElement;
+				if (!el) return 0;
+				const v = el.isContentEditable ? (el.innerText || '') : (el.value || '');
+				return v.length;
+			}`, text)
+			if verr == nil && verify.Value.Int() >= len(text)/2 {
+				return nil
+			}
+			// else fall through to native setter
+		}
+	}
 
 	// Large prompt: use ClipboardEvent paste (instant, no freeze)
 	if len(text) > 200 {
@@ -83,29 +121,90 @@ func (h *HumanBehavior) TypeTextFast(text string) error {
 			} catch(e) { return 'err:'+e.message; }
 		}`, text)
 		if err == nil {
-			return nil
+			if ok := h.verifyInputLength(text); ok {
+				return nil
+			}
+			// fall through to React-native setter
 		}
-		// Fall through to execCommand if paste failed
+		// Fall through to native setter if paste failed
 	}
 
-	// Standard path: execCommand insertText (fires beforeinput/input for ProseMirror)
+	// React-compatible path for textarea/input: native setter + InputEvent.
+	// Plain `el.value += text` bypasses React's value tracker.
 	_, err := h.page.Eval(`(text) => {
 		const el = document.activeElement;
-		if (el && el.isContentEditable) {
-			el.focus();
-			return document.execCommand('insertText', false, text) ? 'ok' : 'failed';
-		} else if (el) {
-			el.value += text;
-			el.dispatchEvent(new Event('input', { bubbles: true }));
-			return 'ok';
-		}
-		return 'no-element';
+		if (!el) return 'no-element';
+		el.focus();
+		try {
+			if (el.isContentEditable) {
+				el.focus();
+				const ok = document.execCommand('insertText', false, text);
+				if (ok) return 'ok-contenteditable';
+				// last resort for contenteditable
+				el.innerText = text;
+				el.dispatchEvent(new InputEvent('input', {bubbles: true, data: text, inputType: 'insertText'}));
+				return 'ok-ce-fallback';
+			}
+			// textarea / input: use native setter so React sees the change
+			const proto = el.tagName === 'TEXTAREA'
+				? window.HTMLTextAreaElement.prototype
+				: window.HTMLInputElement.prototype;
+			const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+			if (desc && desc.set) {
+				// Reset React's tracker first (React 16+)
+				if (el._valueTracker) { try { el._valueTracker.setValue(''); } catch(e) {} }
+				desc.set.call(el, text);
+			} else {
+				el.value = text;
+			}
+			// Fire the events React listens to
+			el.dispatchEvent(new InputEvent('input', {bubbles: true, data: text, inputType: 'insertText'}));
+			el.dispatchEvent(new Event('change', {bubbles: true}));
+			// Move cursor to end + scroll into view so send button activates
+			try {
+				el.focus();
+				const n = (el.value || '').length;
+				if (el.setSelectionRange) el.setSelectionRange(n, n);
+				el.scrollTop = el.scrollHeight;
+			} catch(e) {}
+			return 'ok-native';
+		} catch(e) { return 'err:'+e.message; }
 	}`, text)
 	if err != nil {
 		// Final fallback: rod's native InsertText (CDP InputInsertText)
-		return h.page.InsertText(text)
+		_ = h.page.InsertText(text)
+		_, _ = h.page.Eval(`(text) => {
+			const el = document.activeElement;
+			if (el) el.dispatchEvent(new InputEvent('input', {bubbles: true, data: text, inputType: 'insertText'}));
+		}`, text)
+		return nil
 	}
-	return err
+	if !h.verifyInputLength(text) {
+		// Native setter reported ok but value didn't stick — try CDP InsertText + re-fire input
+		_ = h.page.InsertText(text)
+		time.Sleep(200 * time.Millisecond)
+		_, _ = h.page.Eval(`(text) => {
+			const el = document.activeElement;
+			if (el) el.dispatchEvent(new InputEvent('input', {bubbles: true, data: text, inputType: 'insertText'}));
+		}`, text)
+		time.Sleep(200 * time.Millisecond)
+	}
+	return nil
+}
+
+// verifyInputLength checks the focused element actually holds at least half the text.
+// Returns true if insertion looks successful.
+func (h *HumanBehavior) verifyInputLength(text string) bool {
+	res, err := h.page.Eval(`(text) => {
+		const el = document.activeElement;
+		if (!el) return 0;
+		const v = el.isContentEditable ? (el.innerText || '') : (el.value || '');
+		return v.length;
+	}`, text)
+	if err != nil {
+		return false
+	}
+	return res.Value.Int() >= len(text)/2
 }
 
 // InsertText is the smart entry used by providers — delegates to TypeTextFast with length gate.
@@ -114,34 +213,22 @@ func (h *HumanBehavior) InsertText(text string) error {
 }
 
 // Click performs a human-like click with hover first.
+// Falls back to JS click when CDP click fails (e.g., covered element).
 func (h *HumanBehavior) Click(element *rod.Element) error {
-	// Get element position via JS
-	result, err := element.Eval(`(el) => {
-		const rect = el.getBoundingClientRect();
-		return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-	}`)
-	if err != nil {
-		return err
-	}
-
-	// Parse the result
-	var pos struct {
-		X float64 `json:"x"`
-		Y float64 `json:"y"`
-	}
-	if err := result.Value.Unmarshal(&pos); err != nil {
-		return err
-	}
-
-	// Hover with slight offset
-	offsetX := rand.Float64()*10 - 5 // ±5px
-	offsetY := rand.Float64()*10 - 5
-
-	_ = h.page.Mouse.MoveTo(proto.Point{X: pos.X + offsetX, Y: pos.Y + offsetY})
+	// Small human pause + hover attempt (best effort, ignore errors)
 	time.Sleep(time.Duration(50+rand.Intn(200)) * time.Millisecond)
-
-	// Click
-	return element.Click(proto.InputMouseButtonLeft, 1)
+	// Primary: rod CDP click (scrolls into view)
+	if err := element.Click(proto.InputMouseButtonLeft, 1); err == nil {
+		return nil
+	} else {
+		// Fallback: JS click (bypasses actionability checks)
+		if _, jerr := element.Eval(`() => { this.click(); return true; }`); jerr == nil {
+			return nil
+		} else {
+			// Return original CDP error with JS error context
+			return err
+		}
+	}
 }
 
 // PressEnter presses the Enter key.
