@@ -12,11 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-rod/rod"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/auth"
+	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/logging"
 	"github.com/chimera/chimera/internal/meter"
 	"github.com/chimera/chimera/internal/models"
@@ -24,6 +21,9 @@ import (
 	"github.com/chimera/chimera/internal/session"
 	"github.com/chimera/chimera/internal/telemetry"
 	"github.com/chimera/chimera/internal/tools"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-rod/rod"
 	"golang.org/x/time/rate"
 )
 
@@ -380,9 +380,28 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		telemetry.ObserveHTTP(r.Method, r.URL.Path, strconv.Itoa(rec.status), time.Since(start))
+		telemetry.ObserveHTTP(r.Method, boundedPath(r), strconv.Itoa(rec.status), time.Since(start))
 	})
 }
+
+// boundedPath returns a bounded label for HTTP metrics: the matched chi route
+// pattern when available, the static path for known open endpoints, else
+// "other". Raw client paths must never reach Prometheus labels, or any random
+// URL becomes a new time series (cardinality DoS).
+func boundedPath(r *http.Request) string {
+	if rc := chi.RouteContext(r.Context()); rc != nil {
+		if p := rc.RoutePattern(); p != "" && !strings.Contains(p, "*") {
+			return p
+		}
+	}
+	switch r.URL.Path {
+	case "/", "/health", "/metrics":
+		return r.URL.Path
+	default:
+		return "other"
+	}
+}
+
 // acquireProviderLock locks mu with timeout + client-disconnect awareness.
 // Prevents a hung browser from hanging HTTP forever (returns false on timeout/cancel).
 func acquireProviderLock(ctx context.Context, mu *sync.Mutex, timeout time.Duration) bool {
