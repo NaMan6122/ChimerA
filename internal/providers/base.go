@@ -41,6 +41,31 @@ func (b *Base) ModelID() string { return b.ModelID_ }
 // FindElement tries multiple CSS selectors and returns the first match.
 // Falls past the first choice are counted: spikes mean a vendor UI changed.
 func (b *Base) FindElement(selectors []string, timeout time.Duration) (*rod.Element, error) {
+	// Two-pass. rod's Element() polls until the timeout expires, so a selector
+	// that will *never* match used to cost the full timeout on every request —
+	// a single stale entry at index 0 added seconds to each turn. Probe the
+	// whole chain quickly first: on a live UI the target is already in the DOM,
+	// so a dead trailing selector now costs ~probe instead of ~timeout.
+	//
+	// Trade-off: if an earlier selector would have appeared *within* probe after
+	// a page load, the fast pass may return a later one instead. Both passes scan
+	// in the same order, so this only affects genuinely late-rendering elements.
+	probe := 500 * time.Millisecond
+	if timeout < probe {
+		probe = timeout
+	}
+	for i, sel := range selectors {
+		el, err := b.Page.Timeout(probe).Element(sel)
+		if err == nil {
+			if i > 0 {
+				telemetry.ObserveSelectorFallback(b.Name_)
+			}
+			return el, nil
+		}
+	}
+
+	// Slow pass: the page may still be rendering. Preserves the original
+	// semantics exactly — each selector gets the full timeout, in order.
 	for i, sel := range selectors {
 		el, err := b.Page.Timeout(timeout).Element(sel)
 		if err == nil {
