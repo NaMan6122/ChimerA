@@ -607,3 +607,30 @@ func TestChatCompletionsStream(t *testing.T) {
 	}
 }
 
+// TestMetricsPathLabelBounded ensures arbitrary request paths can't create new
+// Prometheus label values (cardinality DoS).
+func TestMetricsPathLabelBounded(t *testing.T) {
+	cfg := testConfig()
+	cfg.RateLimitSeconds = 10
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+
+	randPath := "/v1/no-such-route-" + time.Now().Format("150405.000000")
+	req := httptest.NewRequest("GET", randPath, nil)
+	req.Header.Set("Authorization", "Bearer testtoken")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unknown route status = %d, want 404", w.Code)
+	}
+
+	mw := httptest.NewRecorder()
+	srv.Router().ServeHTTP(mw, httptest.NewRequest("GET", "/metrics", nil))
+	text := mw.Body.String()
+	if strings.Contains(text, "no-such-route") {
+		t.Fatalf("raw path leaked into metrics labels")
+	}
+	if !strings.Contains(text, `path="other"`) {
+		t.Fatalf("expected bounded path=\"other\" series, got: %s", text)
+	}
+}
