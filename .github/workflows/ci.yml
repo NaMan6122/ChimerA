@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: vet, build, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Test (race)
+        run: go test -race ./...
+
+  docker:
+    name: docker build + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t chimera:ci .
+      - name: Smoke test image (binary + supervisord wiring)
+        run: |
+          docker run --rm --entrypoint /bin/sh chimera:ci -c '
+            test -x /usr/local/bin/chimera &&
+            grep -q "command=/usr/local/bin/chimera" /etc/supervisor/conf.d/supervisord.conf &&
+            grep -q -- "-rfbauth /root/.vnc/passwd" /etc/supervisor/conf.d/supervisord.conf
+          '

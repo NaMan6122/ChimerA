@@ -219,9 +219,11 @@ Adding a new provider: copy `qwen/` template, define fallback selector lists, re
 ## Docker (planned, mirroring Chimera)
 
 ```dockerfile
-# multi-stage: golang:1.23 builder → debian:bookworm-slim + chromium + xvfb + x11vnc + novnc + supervisord → chimera :8000, VNC :6080
+# multi-stage: golang:1.25 builder → debian:bookworm-slim + chromium + xvfb + x11vnc + novnc + supervisord → chimera :8000, VNC :6080
 docker compose up --build -d
 open http://localhost:6080/vnc.html   # one-time login
+# VNC is password-protected: set VNC_PASSWORD in .env, or read the generated one:
+#   docker compose logs chimera | grep "VNC_PASSWORD"
 curl -H "Authorization: Bearer chimera" http://localhost:8000/v1/models
 ```
 

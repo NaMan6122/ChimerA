@@ -13,7 +13,13 @@ var SendButton = []string{
 	"div[class*='send'] button",
 	"button[aria-label='Send']",
 	"button[aria-label='发送']",
+	"button[aria-label*='Send']",
+	"button[aria-label*='发送']",
 	"button[type='submit']",
+	"button[class*='send']",
+	"button[class*='send-btn']",
+	"button[class*='submit-btn']",
+	"button.ant-btn",
 }
 
 var StopButton = []string{
