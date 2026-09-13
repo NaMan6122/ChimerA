@@ -985,6 +985,47 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 	s.saveSessionURL(sessionID, provider)
 
 	text := providerResp.Message
+	// Streaming clients (agent harnesses like anv/opencode) read tool calls from
+	// delta.tool_calls, not from content. Parse first; when a call is present,
+	// emit it as a delta and terminate with finish_reason "tool_calls" instead
+	// of replaying the raw JSON as plain text.
+	var toolCalls []models.ToolCall
+	if len(req.Tools) > 0 {
+		toolCalls = parseToolCallsIfPresent(text, req.Tools, providerName)
+	}
+	if len(toolCalls) > 0 {
+		deltas := make([]models.ToolCallDelta, 0, len(toolCalls))
+		for i, tc := range toolCalls {
+			deltas = append(deltas, models.ToolCallDelta{
+				Index:    i,
+				ID:       tc.ID,
+				Type:     tc.Type,
+				Function: tc.Function,
+			})
+		}
+		callChunk := models.ChatCompletionChunk{
+			ID:      respID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   provider.ModelID(),
+			Choices: []models.ChunkChoice{{Index: 0, Delta: models.DeltaMsg{ToolCalls: deltas}}},
+		}
+		sendSSE(w, callChunk)
+		flusher.Flush()
+		finalChunk := models.ChatCompletionChunk{
+			ID:      respID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   provider.ModelID(),
+			Choices: []models.ChunkChoice{{Index: 0, FinishReason: determineFinishReason(toolCalls)}},
+		}
+		sendSSE(w, finalChunk)
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+
 	chunkSize := 20
 	for i := 0; i < len(text); i += chunkSize {
 		select {

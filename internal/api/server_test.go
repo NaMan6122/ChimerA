@@ -175,6 +175,46 @@ func TestChatCompletionsToolCalls(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsStreamToolCalls(t *testing.T) {
+	cfg := testConfig()
+	cfg.RateLimitSeconds = 10
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+
+	body := `{
+		"model":"chimera-chatgpt",
+		"stream":true,
+		"messages":[{"role":"user","content":"trigger_tool"}],
+		"tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]
+	}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer testtoken")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+	sse := w.Body.String()
+	if !strings.Contains(sse, `"tool_calls"`) {
+		t.Fatalf("stream missing tool_calls delta: %s", sse)
+	}
+	if !strings.Contains(sse, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("stream missing finish_reason tool_calls: %s", sse)
+	}
+	if !strings.Contains(sse, `"name":"get_weather"`) {
+		t.Fatalf("stream missing tool name: %s", sse)
+	}
+	// The raw tool-call JSON must not be replayed as assistant content.
+	if strings.Contains(sse, `"content"`) {
+		t.Fatalf("tool-call turn streamed content: %s", sse)
+	}
+	if !strings.HasSuffix(sse, "data: [DONE]\n\n") {
+		t.Fatalf("stream missing terminator: %s", sse)
+	}
+}
+
 func TestHealth(t *testing.T) {
 	cfg := testConfig()
 	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
