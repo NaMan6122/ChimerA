@@ -157,8 +157,19 @@ type ChunkChoice struct {
 
 // DeltaMsg is the incremental content in a streaming chunk.
 type DeltaMsg struct {
-	Role    string     `json:"role,omitempty"`
-	Content string     `json:"content,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	ToolCalls []ToolCallDelta `json:"tool_calls,omitempty"`
+}
+
+// ToolCallDelta is one tool call inside a streaming delta. OpenAI uses
+// `index` to address fragments of the same call; ChimerA emits each call
+// whole, so index is its position in the array.
+type ToolCallDelta struct {
+	Index    int          `json:"index"`
+	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
+	Function FunctionCall `json:"function"`
 }
 
 // ── Model Listing ─────────────────────────────────────────────
