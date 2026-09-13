@@ -1,5 +1,6 @@
 .anvaya/
 browser_data/
+auth_data/
 logs/
 thegate
 chimera
