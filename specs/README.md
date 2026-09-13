@@ -25,6 +25,7 @@ problem → design → files → acceptance. Build in dependency order.
 | 008 | [Response cache](008-response-cache.md) | Perf | S–M | — |
 | 009 | [Playground page](009-playground.md) | DX | S | — |
 | 010 | [Eval harness](010-eval-harness.md) | DX | S–M | 006 (fixtures reuse pack schema) |
+| 011 | [Provider transports](011-provider-transports.md) | Substrate | L | 005-metrics (done), ADR-001 |
 
-Suggested build order: 004 → 002 → 003 → 001 → 008 → 005 → 006 → 007 → 009 → 010.
+Suggested build order: 004 → 002 → 003 → 001 → 008 → 005 → 006 → 007 → 009 → 010 → 011.
 (Tool hardening first because 002/003 consume its parser; MCP any time after 004.)
