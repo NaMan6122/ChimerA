@@ -12,11 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-rod/rod"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/auth"
+	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/logging"
 	"github.com/chimera/chimera/internal/meter"
 	"github.com/chimera/chimera/internal/models"
@@ -24,6 +21,9 @@ import (
 	"github.com/chimera/chimera/internal/session"
 	"github.com/chimera/chimera/internal/telemetry"
 	"github.com/chimera/chimera/internal/tools"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-rod/rod"
 	"golang.org/x/time/rate"
 )
 
@@ -34,15 +34,15 @@ var log_ = logging.New("api", "./logs", "debug", true)
 type Server struct {
 	cfg        *config.Config
 	router     *chi.Mux
-	provider   providers.Provider             // single-provider mode (legacy)
+	provider   providers.Provider            // single-provider mode (legacy)
 	providers  map[string]providers.Provider // pooled mode: provider name -> Provider
 	mus        map[string]*sync.Mutex        // pooled mode: per-provider mutex
-	sessionMgr *session.Manager               // X-Session-Id continuity
-	browser    *rod.Browser                   // for session pages
+	sessionMgr *session.Manager              // X-Session-Id continuity
+	browser    *rod.Browser                  // for session pages
 	limiter    *rate.Limiter
 	keys       *auth.Keys   // credential -> tenant registry
 	meter      *meter.Store // usage recording, nil when METER_DB=""
-	mu         sync.Mutex // serializes browser access for single mode
+	mu         sync.Mutex   // serializes browser access for single mode
 }
 
 // keysForConfig returns the parsed registry, building one from raw tokens
@@ -345,6 +345,11 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 }
 
 // statusRecorder captures the response code for metrics.
+//
+// It must forward the optional interfaces of the wrapped writer (Flush, Unwrap):
+// embedding http.ResponseWriter only promotes its three methods, so without
+// Flush() the SSE handler's http.Flusher assertion fails and every
+// stream:true request returns 500.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -354,6 +359,16 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
 }
+
+// Flush forwards to the underlying writer so SSE streaming survives middleware.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the wrapped writer for http.ResponseController.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // metricsMiddleware records per-request HTTP metrics.
 func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
@@ -365,9 +380,28 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		telemetry.ObserveHTTP(r.Method, r.URL.Path, strconv.Itoa(rec.status), time.Since(start))
+		telemetry.ObserveHTTP(r.Method, boundedPath(r), strconv.Itoa(rec.status), time.Since(start))
 	})
 }
+
+// boundedPath returns a bounded label for HTTP metrics: the matched chi route
+// pattern when available, the static path for known open endpoints, else
+// "other". Raw client paths must never reach Prometheus labels, or any random
+// URL becomes a new time series (cardinality DoS).
+func boundedPath(r *http.Request) string {
+	if rc := chi.RouteContext(r.Context()); rc != nil {
+		if p := rc.RoutePattern(); p != "" && !strings.Contains(p, "*") {
+			return p
+		}
+	}
+	switch r.URL.Path {
+	case "/", "/health", "/metrics":
+		return r.URL.Path
+	default:
+		return "other"
+	}
+}
+
 // acquireProviderLock locks mu with timeout + client-disconnect awareness.
 // Prevents a hung browser from hanging HTTP forever (returns false on timeout/cancel).
 func acquireProviderLock(ctx context.Context, mu *sync.Mutex, timeout time.Duration) bool {
@@ -537,16 +571,16 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"object":          "usage",
-		"tenant":          tenant,
-		"from":            from.Format(time.RFC3339),
-		"to":              to.Format(time.RFC3339),
-		"requests":        u.Requests,
-		"prompt_chars":    u.PromptChars,
+		"object":           "usage",
+		"tenant":           tenant,
+		"from":             from.Format(time.RFC3339),
+		"to":               to.Format(time.RFC3339),
+		"requests":         u.Requests,
+		"prompt_chars":     u.PromptChars,
 		"completion_chars": u.CompletionChars,
-		"errors":          u.Errors,
-		"by_provider":     u.ByProvider,
-		"quota_monthly":   limit,
+		"errors":           u.Errors,
+		"by_provider":      u.ByProvider,
+		"quota_monthly":    limit,
 	})
 }
 
@@ -1191,9 +1225,9 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	log_.Infof("Refresh succeeded for %s in %v", providerName, elapsed)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":   "ok",
-		"provider": providerName,
-		"model":    provider.ModelID(),
+		"status":     "ok",
+		"provider":   providerName,
+		"model":      provider.ModelID(),
 		"elapsed_ms": elapsed.Milliseconds(),
 	})
 }

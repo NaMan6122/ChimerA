@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-rod/rod"
 	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/models"
+	"github.com/go-rod/rod"
 )
 
 // mockProvider is a no-browser stub for API tests.
@@ -21,8 +21,8 @@ type mockProvider struct {
 	reply   string
 }
 
-func (m *mockProvider) Name() string    { return m.name }
-func (m *mockProvider) ModelID() string { return m.modelID }
+func (m *mockProvider) Name() string                             { return m.name }
+func (m *mockProvider) ModelID() string                          { return m.modelID }
 func (m *mockProvider) Init(_ *rod.Page, _ *config.Config) error { return nil }
 func (m *mockProvider) SendMessage(text string, threadID string) (*models.ProviderResponse, error) {
 	// Echo with tool-call simulation if marker present
@@ -34,17 +34,19 @@ func (m *mockProvider) SendMessage(text string, threadID string) (*models.Provid
 	return &models.ProviderResponse{Message: "mock reply to: " + text, ThreadID: threadID}, nil
 }
 
-func contains(s, sub string) bool { return len(s) >= len(sub) && (func() bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (func() bool {
+		for i := 0; i <= len(s)-len(sub); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
 		}
-	}
-	return false
-})() }
-func (m *mockProvider) NewChat() error                     { return nil }
-func (m *mockProvider) ExtractResponse() (string, error)   { return m.reply, nil }
-func (m *mockProvider) IsLoggedIn() (bool, error)          { return true, nil }
+		return false
+	})()
+}
+func (m *mockProvider) NewChat() error                   { return nil }
+func (m *mockProvider) ExtractResponse() (string, error) { return m.reply, nil }
+func (m *mockProvider) IsLoggedIn() (bool, error)        { return true, nil }
 
 func testConfig() *config.Config {
 	return &config.Config{
@@ -364,12 +366,12 @@ func TestUsageEndpoint(t *testing.T) {
 		t.Fatalf("usage expected 200 got %d body %s", w.Code, w.Body.String())
 	}
 	var resp struct {
-		Object        string         `json:"object"`
-		Tenant        string         `json:"tenant"`
-		Requests      int            `json:"requests"`
-		PromptChars   int64          `json:"prompt_chars"`
-		ByProvider    map[string]int `json:"by_provider"`
-		QuotaMonthly  int            `json:"quota_monthly"`
+		Object       string         `json:"object"`
+		Tenant       string         `json:"tenant"`
+		Requests     int            `json:"requests"`
+		PromptChars  int64          `json:"prompt_chars"`
+		ByProvider   map[string]int `json:"by_provider"`
+		QuotaMonthly int            `json:"quota_monthly"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
@@ -571,5 +573,64 @@ func TestResponsesRecorded(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("month count = %d, want 1 (shared pipeline records responses turns)", n)
+	}
+}
+
+// TestChatCompletionsStream guards the metrics middleware from dropping
+// http.Flusher: the SSE path must return 200 text/event-stream with chunks and
+// a terminating [DONE], not a 500 "streaming not supported".
+func TestChatCompletionsStream(t *testing.T) {
+	cfg := testConfig()
+	cfg.RateLimitSeconds = 10
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+
+	body := `{"model":"chimera-chatgpt","messages":[{"role":"user","content":"hello"}],"stream":true}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer testtoken")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("stream status %d body %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("content-type = %q, want text/event-stream", ct)
+	}
+	text := w.Body.String()
+	if !strings.Contains(text, `"object":"chat.completion.chunk"`) {
+		t.Fatalf("missing chunk payload: %s", text)
+	}
+	if !strings.HasSuffix(text, "data: [DONE]\n\n") {
+		t.Fatalf("missing [DONE] terminator: %s", text)
+	}
+}
+
+// TestMetricsPathLabelBounded ensures arbitrary request paths can't create new
+// Prometheus label values (cardinality DoS).
+func TestMetricsPathLabelBounded(t *testing.T) {
+	cfg := testConfig()
+	cfg.RateLimitSeconds = 10
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+
+	randPath := "/v1/no-such-route-" + time.Now().Format("150405.000000")
+	req := httptest.NewRequest("GET", randPath, nil)
+	req.Header.Set("Authorization", "Bearer testtoken")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unknown route status = %d, want 404", w.Code)
+	}
+
+	mw := httptest.NewRecorder()
+	srv.Router().ServeHTTP(mw, httptest.NewRequest("GET", "/metrics", nil))
+	text := mw.Body.String()
+	if strings.Contains(text, "no-such-route") {
+		t.Fatalf("raw path leaked into metrics labels")
+	}
+	if !strings.Contains(text, `path="other"`) {
+		t.Fatalf("expected bounded path=\"other\" series, got: %s", text)
 	}
 }

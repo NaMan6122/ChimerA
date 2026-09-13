@@ -39,6 +39,21 @@ func TestCountersAndHistograms(t *testing.T) {
 	}
 }
 
+func TestObserveChatRequestBoundsModel(t *testing.T) {
+	const attackerModel = "totally-not-a-model-<script>"
+	ObserveChatRequest("chatgpt", attackerModel, "400")
+	if got := testutil.ToFloat64(Default.ChatRequests.WithLabelValues("chatgpt", "unknown", "400")); got != 1 {
+		t.Fatalf("bounded model counter = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(Default.ChatRequests.WithLabelValues("chatgpt", attackerModel, "400")); got != 0 {
+		t.Fatalf("raw model leaked into metrics: %v", got)
+	}
+	ObserveChatRequest("chatgpt", "chimera-chatgpt", "200")
+	if got := testutil.ToFloat64(Default.ChatRequests.WithLabelValues("chatgpt", "chimera-chatgpt", "200")); got != 1 {
+		t.Fatalf("known model counter = %v, want 1", got)
+	}
+}
+
 func TestHandlerExposesMetrics(t *testing.T) {
 	m := New()
 	m.ChatRequests.WithLabelValues("chatgpt", "chimera-chatgpt", "200").Inc()

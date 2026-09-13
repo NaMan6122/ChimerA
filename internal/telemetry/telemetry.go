@@ -177,9 +177,25 @@ var Default = New()
 // Handler exposes Default in Prometheus format.
 func Handler() http.Handler { return Default.Handler() }
 
+// knownMetricModels bounds the model label to configured model IDs (and the
+// raw provider names). Any other client-supplied string maps to "unknown" so
+// request input can never drive Prometheus cardinality.
+var knownMetricModels = map[string]struct{}{
+	"chimera-chatgpt": {}, "chimera-claude": {}, "chimera-qwen": {},
+	"chimera-deepseek": {}, "chimera-kimi": {},
+	"chatgpt": {}, "claude": {}, "qwen": {}, "deepseek": {}, "kimi": {},
+}
+
+func metricModel(model string) string {
+	if _, ok := knownMetricModels[model]; ok {
+		return model
+	}
+	return "unknown"
+}
+
 // ObserveChatRequest records one chat completion outcome (code like "200", "400", "500").
 func ObserveChatRequest(provider, model, code string) {
-	Default.ChatRequests.WithLabelValues(provider, model, code).Inc()
+	Default.ChatRequests.WithLabelValues(provider, metricModel(model), code).Inc()
 }
 
 // ObserveResponseDuration records a SendMessage round trip.

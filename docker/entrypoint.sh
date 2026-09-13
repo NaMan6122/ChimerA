@@ -43,12 +43,15 @@ if rules:
         f.write(",".join(rules))
 PY
 
-# VNC password
-if [ -n "$VNC_PASSWORD" ]; then
-  mkdir -p /root/.vnc
-  x11vnc -storepasswd "$VNC_PASSWORD" /root/.vnc/passwd 2>/dev/null || true
-  chmod 600 /root/.vnc/passwd
+# VNC password: x11vnc runs with -rfbauth, so the file must always exist.
+# When VNC_PASSWORD is unset we generate one and print it (it is the only way in).
+if [ -z "${VNC_PASSWORD:-}" ]; then
+  VNC_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
+  echo "[entrypoint] VNC_PASSWORD not set — generated: ${VNC_PASSWORD}"
 fi
+mkdir -p /root/.vnc
+x11vnc -storepasswd "$VNC_PASSWORD" /root/.vnc/passwd
+chmod 600 /root/.vnc/passwd
 
 # Verify chromium
 if ! command -v chromium >/dev/null 2>&1; then
