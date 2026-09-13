@@ -6,7 +6,8 @@ Relates to: `docs/TECH_STACK_DECISION.md` (Go/rod, Accepted), `docs/PRD.md` v0.3
 `docs/SAAS.md`, `specs/010-eval-harness.md`
 Evidence: all latency/throughput numbers below were measured against a live
 `PROVIDER=qwen` gateway on this machine, using `scripts/latency_probe.py`,
-`scripts/prompt_limit_probe.py` and `scripts/agentic_penalty_probe.py`.
+`scripts/prompt_limit_probe.py`, `scripts/agentic_penalty_probe.py`, and anv
+headless spins (`scripts/latency_probe.py --mode anv --agentic`).
 
 ---
 
@@ -89,12 +90,46 @@ turn 4:   0.00s   prompt=  96274 chars    400
 turn 5:   0.00s   prompt= 126352 chars    400
 ```
 
-**Latency is flat in prompt size** at these scales, so context processing is not the
-cost. The real agentic blocker is structural: a conversation has nowhere to live
+**Latency is flat in prompt size** at these scales, so context processing is not
+the cost. The real agentic blocker is structural: a conversation has nowhere to live
 except in the textarea, so the whole history is re-flattened and re-sent every turn,
 and any agentic loop walks into the guard by turn 3.
 
-### 2.5 Retraction — the prefix-cache claim
+### 2.5 Agentic harness end-to-end (anv headless spins, with tools)
+
+The intended workload — anv driving ChimerA as its model provider — needed a third
+fix before tools actually ran. anv streams, and the SSE path replayed the model's
+tool-call JSON as plain `content` and always ended `finish_reason: "stop"`; the
+harness therefore never executed a tool call. The non-streaming path already parsed
+calls. Fixed: the emulated stream now emits OpenAI-shaped `delta.tool_calls` and
+`finish_reason: "tool_calls"` (`internal/api/server.go`, regression test
+`TestChatCompletionsStreamToolCalls`).
+
+Five independent tool-using spins (browser refreshed before each spin; 6k-char
+fixture files read through the harness's own `read_file` tool; all 5 answers
+verified; `scripts/latency_probe.py --mode anv --agentic --refresh-each
+--anv-yolo`):
+
+| stage | prompt | wall |
+|---|---|---|
+| round 1 — tool call | 30.1k chars | 14.7s p50 |
+| round 2 — tool result | 34.6k chars | 16.4s p50 |
+| round 3 — answer | 34.7k chars | 20.5s p50 |
+| full spin (2–3 rounds) | — | **49.6s p50** (27.3s min, 53.7s max) |
+| harness overhead (anv startup, tool exec, folding) | — | **0.11s mean** |
+
+All 13 rounds returned 200 — no lock waits, no selector fallbacks. Two readings:
+
+- The harness is free; the cost is browser+model round trips, and per-round cost is
+  nearly flat from 30k to 35k chars, confirming §2.4.
+- anv's artifact folding keeps tool output out of the prompt (≈13k chars offloaded
+  per spin), holding each round at ~30–35k chars. But history is still re-flattened
+  every round (~+4.4k chars), so a long agentic loop reaches the 60k guard around
+  round 7–8, not turn 3 — better than §2.4's stateless probe, still bounded.
+
+Raw: `logs/anv-agentic.log`, `logs/anv-agentic.json`.
+
+### 2.6 Retraction — the prefix-cache claim
 
 I previously claimed that the missing prompt cache compounds across an agentic run
 until it times out, and that this alone disqualified the browser path. **That claim
