@@ -33,6 +33,16 @@ var SupportedProviders = []string{
 	ProviderAll,
 }
 
+// Transport selects how a provider is reached.
+const (
+	// TransportDOM drives the real browser UI (default fallback).
+	TransportDOM = "dom"
+	// TransportWebAPI replays the provider's own web API over HTTP, no browser.
+	TransportWebAPI = "webapi"
+	// TransportAuto prefers webapi when an auth session exists, else dom.
+	TransportAuto = "auto"
+)
+
 // Config holds all project settings.
 type Config struct {
 	// Provider
@@ -42,6 +52,14 @@ type Config struct {
 	BrowserDataDir string
 	Headless       bool
 	SlowMo         time.Duration
+
+	// Transport + auth session material (storage-state files, mode 0600)
+	Transport string
+	AuthDir   string
+
+	// WebAPI model selection (chat.qwen.ai model id + thinking toggle)
+	QwenWebModel    string
+	QwenWebThinking bool
 
 	// Provider URLs
 	ChatGPTURL  string
@@ -108,6 +126,14 @@ func Load() (*Config, error) {
 		Headless:       getEnvBool("HEADLESS", false),
 		SlowMo:         time.Duration(getEnvInt("SLOW_MO", 0)) * time.Millisecond,
 
+		// Transport + auth sessions
+		Transport: getEnvStr("TRANSPORT", TransportAuto),
+		AuthDir:   getEnvStr("AUTH_DIR", "./auth_data"),
+
+		// WebAPI model
+		QwenWebModel:    getEnvStr("QWEN_WEB_MODEL", "qwen3.8-max"),
+		QwenWebThinking: getEnvBool("QWEN_WEB_THINKING", true),
+
 		// Provider URLs
 		ChatGPTURL:  getEnvStr("CHATGPT_URL", "https://chatgpt.com"),
 		ClaudeURL:   getEnvStr("CLAUDE_URL", "https://claude.ai"),
@@ -170,6 +196,14 @@ func Load() (*Config, error) {
 	}
 	cfg.APIKeys = keys
 
+	// Validate transport
+	switch cfg.Transport {
+	case TransportDOM, TransportWebAPI, TransportAuto:
+	default:
+		return nil, fmt.Errorf("unsupported transport %q, supported: %s, %s, %s",
+			cfg.Transport, TransportDOM, TransportWebAPI, TransportAuto)
+	}
+
 	// Validate provider
 	valid := false
 	for _, p := range SupportedProviders {
@@ -216,6 +250,29 @@ func (c *Config) ProviderURLs() map[string]string {
 // IsPooled returns true if Provider is "all" (single Chromium with page per provider).
 func (c *Config) IsPooled() bool { return c.Provider == ProviderAll }
 
+// QwenSessionPath returns the storage-state file for the qwen web transport.
+func (c *Config) QwenSessionPath() string {
+	return filepath.Join(c.AuthDir, "qwen.json")
+}
+
+// UseWebAPI reports whether the qwen web transport must be used. In auto mode
+// it is preferred when an auth session file has been exported; otherwise the
+// gateway falls back to the browser. Non-qwen providers always use the DOM.
+func (c *Config) UseWebAPI() bool {
+	if c.Provider != ProviderQwen {
+		return false
+	}
+	switch c.Transport {
+	case TransportWebAPI:
+		return true
+	case TransportAuto:
+		_, err := os.Stat(c.QwenSessionPath())
+		return err == nil
+	default:
+		return false
+	}
+}
+
 // PooledProviders returns the list of providers to launch in pooled mode.
 // For now, only the 3 verified providers (chatgpt,qwen,deepseek) to avoid 5× login wait.
 // Extend to include claude/kimi once their selectors are verified live.
@@ -239,6 +296,10 @@ func (c *Config) EnsureDirs() error {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("creating %s: %w", dir, err)
 		}
+	}
+	// Auth sessions are password-equivalent: keep them owner-only.
+	if err := os.MkdirAll(c.AuthDir, 0o700); err != nil {
+		return fmt.Errorf("creating %s: %w", c.AuthDir, err)
 	}
 	return nil
 }

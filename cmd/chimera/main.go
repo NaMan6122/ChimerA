@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-rod/rod"
 	"github.com/chimera/chimera/internal/api"
 	"github.com/chimera/chimera/internal/browser"
 	"github.com/chimera/chimera/internal/config"
@@ -26,6 +25,8 @@ import (
 	"github.com/chimera/chimera/internal/providers/deepseek"
 	"github.com/chimera/chimera/internal/providers/kimi"
 	"github.com/chimera/chimera/internal/providers/qwen"
+	qwenweb "github.com/chimera/chimera/internal/providers/webapi/qwen"
+	"github.com/go-rod/rod"
 )
 
 var log_ = logging.New("main", "./logs", "debug", true)
@@ -36,7 +37,7 @@ func main() {
    _____ _                   _   _       
   / ____| |                 | | (_)      
  | (___ | |_ __ _ _ __   __| |  _  ___  
-  \___ \| __/ _`+"`"+` | '_ \ / _`+"`"+` | |/ |/ _ \ 
+  \___ \| __/ _` + "`" + ` | '_ \ / _` + "`" + ` | |/ |/ _ \ 
   ____) | || (_| | | | | (_| | | |  __/ 
  |_____/ \__\__,_|_| |_|\__,_|_|_|\___| 
                                          
@@ -84,6 +85,18 @@ func main() {
 		}
 		server = api.NewPooledServer(cfg, poolProviders, mutexMap, pool.Browser())
 		log_.Infof("Pool ready: %v", pool.ProviderNames())
+	} else if cfg.UseWebAPI() {
+		// Browserless web-API transport (spec 011): no Chromium at all.
+		log_.Infof("Chimera webapi transport (no browser): session=%s model=%s thinking=%v",
+			cfg.QwenSessionPath(), cfg.QwenWebModel, cfg.QwenWebThinking)
+		web := qwenweb.New(cfg)
+		if err := web.Init(nil, cfg); err != nil {
+			log_.Errorf("webapi transport unavailable: %v", err)
+			log_.Errorf("Export a session with: node scripts/qwenweb-spike/cdp-export.mjs && cp logs/qwen-session.json %s", cfg.QwenSessionPath())
+			os.Exit(1)
+		}
+		server = api.NewServer(cfg, web)
+		log_.Infof("Provider %q ready (model=%s, transport=webapi)", web.Name(), web.ModelID())
 	} else {
 		browserMgr = browser.NewManager(cfg)
 		page, err := browserMgr.Launch()

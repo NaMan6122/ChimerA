@@ -117,6 +117,9 @@ benchmarks it against the live DOM gateway on the same machine/account:
   so agentic loops get cheaper per round, not just faster.
 - **No TLS impersonation needed:** plain `net/http` was accepted once the WAF
   cookies were replayed; `bx-ua`/`bx-umidtoken` are generated in Go.
+- **Full gateway E2E** (`internal/providers/webapi/qwen`, `TRANSPORT=webapi`,
+  same endpoint on :8001 next to the DOM gateway on :8000): PONG 3.91s vs 13.72s;
+  30k-char prompt 4.99s vs 15.66s; startup ~1s vs ~2.5 min for Chromium.
 - **Caveats:** the spike sends a single user message (no tool prompting yet, which
   `qwen-reverse` demonstrates is possible on this API); rate limits, cookie
   lifetime, and WAF drift are unmeasured; ToS exposure is unchanged (ADR-001 §4).
