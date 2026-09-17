@@ -27,6 +27,23 @@ const (
 // transport (spec 011 §4).
 var ErrWAF = errors.New("waf challenge")
 
+// HTTPError is a non-2xx response from the qwen web API.
+type HTTPError struct {
+	Status int
+	Body   string
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body) }
+
+// Retryable reports whether the failure may succeed on another transport.
+func (e *HTTPError) Retryable() bool {
+	switch e.Status {
+	case 401, 403, 429, 500, 502, 503, 504:
+		return true
+	}
+	return false
+}
+
 // Session is the storage-state material exported from a logged-in browser.
 // It is password-equivalent: keep the file owner-only and never log it.
 // Loading, expiry, and installation live in session.go.
@@ -147,7 +164,7 @@ func (c *Client) ListModels() ([]string, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet(body))
+		return nil, &HTTPError{Status: resp.StatusCode, Body: snippet(body)}
 	}
 	var doc struct {
 		Data []struct {
@@ -281,7 +298,7 @@ func (c *Client) Send(model, chatID, parentID, prompt string, thinking bool) (*S
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet(raw))
+		return nil, &HTTPError{Status: resp.StatusCode, Body: snippet(raw)}
 	}
 	// WAF challenges arrive as a plain JSON body instead of an SSE stream.
 	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {

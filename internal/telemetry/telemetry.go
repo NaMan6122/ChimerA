@@ -43,17 +43,18 @@ type ProviderHealth struct {
 type Metrics struct {
 	reg *prometheus.Registry
 
-	ChatRequests     *prometheus.CounterVec
-	ResponseDuration *prometheus.HistogramVec
-	ProviderErrors   *prometheus.CounterVec
-	LockWait         *prometheus.HistogramVec
-	SelectorFallback *prometheus.CounterVec
-	EchoRetry        *prometheus.CounterVec
-	ToolNameReject   *prometheus.CounterVec
-	HTTPRequests     *prometheus.CounterVec
-	HTTPDuration     *prometheus.HistogramVec
-	ProviderUp       *prometheus.GaugeVec
-	ProviderLastOK   *prometheus.GaugeVec
+	ChatRequests      *prometheus.CounterVec
+	ResponseDuration  *prometheus.HistogramVec
+	ProviderErrors    *prometheus.CounterVec
+	LockWait          *prometheus.HistogramVec
+	SelectorFallback  *prometheus.CounterVec
+	EchoRetry         *prometheus.CounterVec
+	ToolNameReject    *prometheus.CounterVec
+	TransportFallback *prometheus.CounterVec
+	HTTPRequests      *prometheus.CounterVec
+	HTTPDuration      *prometheus.HistogramVec
+	ProviderUp        *prometheus.GaugeVec
+	ProviderLastOK    *prometheus.GaugeVec
 
 	mu          sync.Mutex
 	lastSuccess map[string]time.Time
@@ -97,6 +98,10 @@ func New() *Metrics {
 		Name: "chimera_tool_name_reject_total",
 		Help: "Tool calls dropped because the name was not requested.",
 	}, []string{"provider"})
+	m.TransportFallback = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "chimera_transport_fallback_total",
+		Help: "Times a provider transport fell back to a secondary transport (spec 011).",
+	}, []string{"provider", "from", "to", "reason"})
 	m.HTTPRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "chimera_http_requests_total",
 		Help: "HTTP responses by method, path and code.",
@@ -116,7 +121,8 @@ func New() *Metrics {
 	}, []string{"provider"})
 	m.reg.MustRegister(
 		m.ChatRequests, m.ResponseDuration, m.ProviderErrors, m.LockWait,
-		m.SelectorFallback, m.EchoRetry, m.ToolNameReject, m.HTTPRequests, m.HTTPDuration,
+		m.SelectorFallback, m.EchoRetry, m.ToolNameReject, m.TransportFallback,
+		m.HTTPRequests, m.HTTPDuration,
 		m.ProviderUp, m.ProviderLastOK,
 	)
 	return m
@@ -239,6 +245,13 @@ func ObserveToolNameReject(provider string) {
 func ObserveHTTP(method, path, code string, d time.Duration) {
 	Default.HTTPRequests.WithLabelValues(method, path, code).Inc()
 	Default.HTTPDuration.WithLabelValues(method, path).Observe(d.Seconds())
+}
+
+// ObserveTransportFallback counts a switch from one provider transport to
+// another (e.g. webapi -> dom on a WAF challenge). Reasons are low-cardinality
+// strings like "waf", "unauthorized", "rate_limited", "init_failed".
+func ObserveTransportFallback(provider, from, to, reason string) {
+	Default.TransportFallback.WithLabelValues(provider, from, to, reason).Inc()
 }
 
 // RecordLoginCheck stores a login-probe result on Default.

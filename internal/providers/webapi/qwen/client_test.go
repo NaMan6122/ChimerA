@@ -1,6 +1,7 @@
 package qwenweb
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -114,6 +115,34 @@ func TestSendDetectsWAF(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "waf challenge") {
 		t.Fatalf("expected ErrWAF, got %v", err)
+	}
+}
+
+func TestHTTPErrorRetryable(t *testing.T) {
+	cases := map[int]bool{
+		400: false, 401: true, 403: true, 404: false,
+		429: true, 500: true, 503: true,
+	}
+	for status, want := range cases {
+		he := &HTTPError{Status: status}
+		if got := he.Retryable(); got != want {
+			t.Errorf("HTTPError{%d}.Retryable() = %v, want %v", status, got, want)
+		}
+	}
+}
+
+func TestListModelsAuthErrorIsTyped(t *testing.T) {
+	c, srv := testClient(t)
+	defer srv.Close()
+	c.token = "wrong-token"
+
+	_, err := c.ListModels()
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		t.Fatalf("expected *HTTPError, got %T: %v", err, err)
+	}
+	if he.Status != 401 || !he.Retryable() {
+		t.Fatalf("status=%d retryable=%v", he.Status, he.Retryable())
 	}
 }
 
