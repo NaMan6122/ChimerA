@@ -2,8 +2,8 @@
 browser_data/
 auth_data/
 logs/
-thegate
-chimera
+/thegate
+/chimera
 *.log
 .env
 tenants/

@@ -32,6 +32,12 @@ import (
 var log_ = logging.New("main", "./logs", "debug", true)
 
 func main() {
+	// `chimera auth ...` manages storage-state sessions; it is not the server.
+	if len(os.Args) > 1 && os.Args[1] == "auth" {
+		runAuth(os.Args[2:])
+		return
+	}
+
 	// Banner
 	fmt.Println(`
    _____ _                   _   _       
@@ -92,10 +98,20 @@ func main() {
 		web := qwenweb.New(cfg)
 		if err := web.Init(nil, cfg); err != nil {
 			log_.Errorf("webapi transport unavailable: %v", err)
-			log_.Errorf("Export a session with: node scripts/qwenweb-spike/cdp-export.mjs && cp logs/qwen-session.json %s", cfg.QwenSessionPath())
+			log_.Errorf("Create one with: ./chimera auth login (or ./chimera auth import -file logs/qwen-session.json)")
 			os.Exit(1)
 		}
 		server = api.NewServer(cfg, web)
+		if exp, ok := web.SessionExpiry(); ok {
+			days := time.Until(exp).Hours() / 24
+			if days < 7 {
+				log_.Warnf("qwen web session expires in %.1f days — run `chimera auth login` to refresh", days)
+			} else {
+				log_.Infof("qwen web session valid for %.0f more days", days)
+			}
+		} else {
+			log_.Warnf("qwen web session token has no exp claim; expiry unknown")
+		}
 		log_.Infof("Provider %q ready (model=%s, transport=webapi)", web.Name(), web.ModelID())
 	} else {
 		browserMgr = browser.NewManager(cfg)

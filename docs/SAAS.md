@@ -49,7 +49,7 @@ Tenant B ──► chimera-b :8102 ──► Chromium B (profile /tenants/b) ─
 
 * 1 container = 1 Chromium = 1 tenant. Never share `browser_data` across tenants.
 * `PROVIDER=all` = 1 Chromium with page-per-provider for *that tenant only*.
-* **Browserless tenants need no Chromium** (ADR-002): one storage-state file per tenant (`AUTH_DIR/<provider>.json`, mode 0600) and ~18 MB RAM. Login is a one-time browser export (`scripts/qwenweb-spike/cdp-export.mjs` today; first-class import command planned), not a persistent VNC session. A 32 GB host holds ~20 browser tenants **or** hundreds of browserless ones — the binding constraint is the vendor's per-account rate limit, not our hardware.
+* **Browserless tenants need no Chromium** (ADR-002): one storage-state file per tenant (`AUTH_DIR/<provider>.json`, mode 0600) and ~18 MB RAM. Login is one command — `chimera auth login` opens a browser once and stores the session; `chimera auth status` checks validity/expiry; `chimera auth import` ingests an external export. No persistent VNC session. A 32 GB host holds ~20 browser tenants **or** hundreds of browserless ones — the binding constraint is the vendor's per-account rate limit, not our hardware.
 * Per-tenant: `API_TOKEN` (random 32B), `VNC_PASSWORD` (random, dom only), `API_PORT`, `VNC_PORT`, `NOVNC_PORT`.
 * Front with Caddy/Traefik: `https://<tenant>.yourdomain.com/v1 → localhost:<API_PORT>`, basic auth or header `Authorization: Bearer <API_TOKEN>`.
 * Meter at gateway: request count, browser-minutes (dom), error rate, transport fallbacks. Bill browser-hour for dom, account-month + requests for webapi — never tokens.
@@ -100,7 +100,7 @@ curl -H "Authorization: Bearer <tenant-token>" http://localhost:8101/v1/models
 * Ingress: `acme.yourdomain.com → svc/chimera-acme:8000`.
 
 ### D. Browserless tenant (webapi, ADR-002)
-* No browser, no VNC: one-time export → `AUTH_DIR/qwen.json` (0600) → `TRANSPORT=auto`.
+* No browser, no VNC: `./chimera auth login` once → `AUTH_DIR/qwen.json` (0600) → `TRANSPORT=auto`.
 * One 18 MB process per tenant today (`AUTH_DIR` is process-wide); hundreds fit on
   one host. Routing many tenants/sessions through one shared gateway is a follow-up.
 * `TRANSPORT_FALLBACK=dom` opts a tenant back into a warm browser for request-time
@@ -115,8 +115,8 @@ curl -H "Authorization: Bearer <tenant-token>" http://localhost:8101/v1/models
 * [ ] Status page + selector changelog (vendors break monthly).
 * [ ] `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, GH Actions `go vet + test + docker build`.
 * [ ] `goreleaser` + `ghcr.io/<org>/chimera:latest` + versioned tags.
-* [ ] Support runbook: webapi → session re-export (`cdp-export.mjs`); dom → `POST /v1/refresh` → VNC re-login → wipe `SingletonLock` → restart.
-* [ ] Session-expiry alerts from `/v1/health/providers` before a tenant sees a 401/WAF.
+* [ ] Support runbook: webapi → `chimera auth login` (or `auth import`); dom → `POST /v1/refresh` → VNC re-login → wipe `SingletonLock` → restart.
+* [ ] Session-expiry awareness: startup warning at <7 days (`chimera auth status` for on-demand); `/v1/health/providers` reports `logged_in=false` before a tenant sees a 401/WAF.
 * [ ] Managed-tier legal review before charging for either substrate (ADR-001 §4, ADR-002 §6).
 
 ## 7. Pitch copy (reuse)

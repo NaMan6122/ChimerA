@@ -126,18 +126,20 @@ benchmarks it against the live DOM gateway on the same machine/account:
 
 ## Files
 
+Shipped:
+- `internal/providers/webapi/qwen/{client,cookies,bxua,fingerprint,session}.go` —
+  transport + storage-state load/install/status (LZW golden vectors, httptest SSE)
+- `cmd/chimera/auth.go` — `chimera auth login|import|status` session management
+- `cmd/chimera/main.go` — `TRANSPORT` selection wiring
+- `internal/config/config.go` — `TRANSPORT`, `AUTH_DIR`, `QWEN_WEB_*`
+- `.env.example` — new rows
 - `scripts/qwenweb-spike/{main.go,cookies_test.go,cdp-export.mjs}` — spike +
   CDP session export (evidence for this spec; not shipped in the binary)
 
-- `internal/providers/transport.go` — interfaces, `Delta`, fallback wrapper
+Planned (target shape from §1):
+- `internal/providers/transport.go` — explicit AuthSession × Transport interfaces
 - `internal/providers/dom/…` — wrap existing clients (mechanical)
 - `internal/authsession/{browser,storage,oauth,apikey}.go`
-- `internal/providers/webapi/qwen/{client,cookies,bxua,fingerprint}.go` + tests
-  (recorded SSE fixtures, LZW golden vectors)
-- `internal/config/config.go` — `TRANSPORT`, `AUTH_DIR` (`getEnv*` pattern)
-- `internal/telemetry` — `chimera_transport_fallback_total`, `transport` label
-- `cmd/chimera/main.go` — wire `auto` selection
-- `.env.example` — new rows
 
 ## Acceptance
 
@@ -148,6 +150,8 @@ benchmarks it against the live DOM gateway on the same machine/account:
   process for a `TRANSPORT=webapi` run.
 - WAF/auth failure after one retry falls back to DOM; metric increments.
 - `PROVIDER=qwen TRANSPORT=webapi` serves `/v1/chat/completions` end to end.
+- `chimera auth login|import|status` manage a session (0600 storage, JWT expiry
+  reported); startup warns when the token expires in <7 days.
 
 ## Out of scope
 

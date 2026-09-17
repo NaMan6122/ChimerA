@@ -74,9 +74,9 @@ ChatGPT / Claude / Qwen / DeepSeek / Kimi login — no API keys, session stays i
 
 **First run (self-host):** `cp .env.example .env && docker compose up` → open
 `:6080/vnc.html`, log in once → `curl /v1/models` → point SDK at `:8000/v1`. Done.
-**First run (browserless):** export the session once
-(`node scripts/qwenweb-spike/cdp-export.mjs && cp logs/qwen-session.json auth_data/qwen.json`)
-→ `TRANSPORT=auto` serves in seconds with no Chromium; health reports session validity.
+**First run (browserless):** `./chimera auth login` once (opens a browser, stores
+`auth_data/qwen.json`) → `TRANSPORT=auto` serves in seconds with no Chromium;
+`chimera auth status` reports token expiry (30-day JWT) and provider validity.
 **Managed:** signup → private VNC URL (dom) or one-time export link (webapi) → token
 + dashboard. Re-login/expiry nudge arrives via health state (`needs_login`), never
 as a surprise 500.

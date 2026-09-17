@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -30,29 +29,10 @@ var ErrWAF = errors.New("waf challenge")
 
 // Session is the storage-state material exported from a logged-in browser.
 // It is password-equivalent: keep the file owner-only and never log it.
+// Loading, expiry, and installation live in session.go.
 type Session struct {
 	AccessToken string            `json:"access_token"`
 	Cookies     map[string]string `json:"cookies"`
-}
-
-// LoadSession reads a storage-state file. The access token is required; cookie
-// material is required in practice too (token-only sessions are WAF-rejected).
-func LoadSession(path string) (*Session, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var s Session
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
-	}
-	if s.AccessToken == "" {
-		return nil, fmt.Errorf("%s: access_token is empty (export with scripts/qwenweb-spike/cdp-export.mjs)", path)
-	}
-	if len(s.Cookies) == 0 {
-		return nil, fmt.Errorf("%s: cookies are empty (token-only sessions are rejected by the WAF)", path)
-	}
-	return &s, nil
 }
 
 // Client is a low-level chat.qwen.ai web API client.
