@@ -47,8 +47,12 @@ See [`docs/TECH_STACK_DECISION.md`](docs/TECH_STACK_DECISION.md) for full compar
 ## Features
 
 - **OpenAI-compatible gateway** — `POST /v1/chat/completions` (JSON + emulated SSE
-  streaming), `GET /v1/models`, tool calling via prompt engineering, session
-  continuity (`X-Session-Id`), `POST /v1/refresh` for stale-DOM recovery.
+  streaming, including tool-call deltas), `GET /v1/models`, tool calling via prompt
+  engineering, session continuity (`X-Session-Id`), `POST /v1/refresh` for stale-DOM recovery.
+- **Two substrates, one API** — `TRANSPORT=auto` drives a real Chromium where the
+  vendor requires it, or replays the provider's own web API browserless for qwen
+  (≈4s turns vs ~14s, 18 MB vs 1.1 GB per tenant, server-side prefix caching).
+  Falls back to the browser on WAF/auth failure.
 - **5 providers, one endpoint** — ChatGPT, Claude, Qwen, DeepSeek, Kimi; `PROVIDER=all`
   runs them in a single Chromium with model-based routing (`chimera-*` IDs).
 - **Built for agents** — works as *the model* (`base_url` swap in any OpenAI client)
@@ -129,7 +133,11 @@ or let five subscriptions vote/fall back behind one tool call.
 | Data | your disk (`./browser_data`) | per-tenant volume |
 | Updates | you pull | maintained selectors + uptime |
 
-Starter pricing: **Solo $19/mo/browser (5k req)** · **Team $79/mo/browser (50k req, `PROVIDER=all`)** · **Scale custom**. Billed on browser-hours, not tokens. Full tiers + Fly/K8s guide in [`docs/SAAS.md`](docs/SAAS.md).
+Starter pricing (proposed, by substrate — not per token): **Subscriber API $9–12/mo**
+(browserless, 10k req) · **Browser Solo $19/mo/browser** (5k req) ·
+**Team $79/mo** (auto transport + warm browser fallback, 50k req) · **Scale custom**.
+Full tiers + unit economics in [`docs/SAAS.md`](docs/SAAS.md) and
+[`docs/ADR-002`](docs/ADR-002-browserless-tier-economics.md).
 
 Single-tenant deploy:
 
@@ -179,6 +187,7 @@ internal/browser            rod manager (UserDataDir persistence, jittered viewp
 internal/models             OpenAI-compatible schemas + ProviderResponse
 internal/tools              tool prompt injection (ChatGPT vs Claude phrasing) + brace-depth JSON parser
 internal/providers          Provider interface + Base (fallback find, wait, count, extract) + 5 clients (chatgpt/claude/qwen/deepseek/kimi) each with selectors.go
+internal/providers/webapi   browserless transports (qwen web API: anti-bot gen, SSE, session import)
 internal/session            X-Session-Id continuity with LRU tab eviction
 internal/api                chi router, multi-key auth, rate limit, SSE streaming emulation, tool-call wiring, quotas, usage, per-provider locks
 ```
@@ -255,9 +264,11 @@ go test ./...                           # full suite (mock-backed, no browser ne
 
 ## FAQ
 
-**Why is it slow?** Every turn drives a real Chromium tab: 5–30s. Chimera is for
-reasoning steps and async agents, not autocomplete-speed loops. Repeats get faster
-once the response cache ([`specs/008`](specs/008-response-cache.md)) lands.
+**Why is it slow?** The browser path drives a real Chromium tab: 10–20s per turn.
+The browserless qwen transport replays the provider's web API instead: ~4s p50,
+18 MB RAM, no browser process. Either way, Chimera is for reasoning steps and async
+agents, not autocomplete-speed loops. Repeats get faster once the response cache
+([`specs/008`](specs/008-response-cache.md)) lands.
 
 **Will my account get banned?** Browser automation can trigger CAPTCHAs, rate limits,
 or bans. Mitigations: headful mode, human-behavior pacing, persistent profiles, and
@@ -283,8 +294,8 @@ and Prometheus observability the Python project doesn't ship.
 
 ## Limitations
 
-- 5–30s latency (real browser)
-- Sessions expire → re-login via browser window or VNC
+- 3–8s latency (browserless qwen) or 10–20s (real browser)
+- Sessions expire → re-login via browser window/VNC, or re-export a webapi session (health reports validity)
 - Selectors brittle → fallback radar alerts; only `selectors.go` needs edit on vendor UI change (config packs planned: [`specs/006`](specs/006-selector-packs.md))
 - Tool calling reliable for 1–7 tools via prompting
 - Per-provider serialization via locks; cross-provider failover planned ([`specs/005`](specs/005-cross-provider-failover.md))
