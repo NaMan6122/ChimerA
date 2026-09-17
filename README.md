@@ -94,6 +94,14 @@ Headless (not recommended — easier to detect):
 HEADLESS=true ./chimera
 ```
 
+### Browserless (qwen — no Chromium)
+
+```bash
+./chimera auth login          # one-time: opens a browser, stores auth_data/qwen.json
+TRANSPORT=webapi ./chimera    # serves in seconds, ~18 MB, no browser process
+./chimera auth status         # session validity + token expiry
+```
+
 ### OpenAI SDK
 
 ```python
@@ -295,7 +303,7 @@ and Prometheus observability the Python project doesn't ship.
 ## Limitations
 
 - 3–8s latency (browserless qwen) or 10–20s (real browser)
-- Sessions expire → re-login via browser window/VNC, or re-export a webapi session (health reports validity)
+- Sessions expire → re-login via browser window/VNC, or `./chimera auth login` for a webapi session (startup logs expiry; `auth status` on demand)
 - Selectors brittle → fallback radar alerts; only `selectors.go` needs edit on vendor UI change (config packs planned: [`specs/006`](specs/006-selector-packs.md))
 - Tool calling reliable for 1–7 tools via prompting
 - Per-provider serialization via locks; cross-provider failover planned ([`specs/005`](specs/005-cross-provider-failover.md))

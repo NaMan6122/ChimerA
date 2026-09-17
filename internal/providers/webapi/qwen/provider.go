@@ -17,6 +17,7 @@ import (
 type Provider struct {
 	cfg    *config.Config
 	client *Client
+	sess   *Session
 
 	mu    sync.Mutex
 	convs map[string]convState
@@ -46,6 +47,7 @@ func (p *Provider) Init(_ *rod.Page, cfg *config.Config) error {
 		return err
 	}
 	timeout := cfg.ResponseTimeout + 30*time.Second
+	p.sess = sess
 	p.client = NewClient(sess, timeout)
 	if ok, err := p.IsLoggedIn(); err != nil {
 		return fmt.Errorf("qwen web session check: %w", err)
@@ -114,6 +116,14 @@ func (p *Provider) IsLoggedIn() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// SessionExpiry reports the token's expiry when the JWT carries an exp claim.
+func (p *Provider) SessionExpiry() (time.Time, bool) {
+	if p.sess == nil {
+		return time.Time{}, false
+	}
+	return p.sess.ExpiresAt()
 }
 
 var _ providers.Provider = (*Provider)(nil)
