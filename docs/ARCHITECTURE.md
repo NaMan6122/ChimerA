@@ -203,7 +203,7 @@ Single replica per provider (browser is stateful, not horizontally scaled withou
 
 ## 8. Limitations (shared with Chimera)
 
-- Latency 5-30s per request (real browser round-trip).
+- Latency 10–20s per request (real browser round-trip); 3–8s on the browserless qwen transport (ADR-002).
 - Sessions expire days/weeks → re-login volume.
 - UI selectors brittle → centralize in `selectors.go`, monitor vendor DOM.
 - Tool calling via prompting reliable for 1-7 tools; complex schemas may need retry.

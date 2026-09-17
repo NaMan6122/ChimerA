@@ -23,10 +23,11 @@ ChatGPT / Claude / Qwen / DeepSeek / Kimi login — no API keys, session stays i
    Anthropic Messages shape, MCP stdio tools.
 
 **Non-goals**
-- Competing with official APIs on latency/throughput (browser turns take 5–30s).
+- Competing with official APIs on latency/throughput (browserless turns 2–8s,
+  browser turns 10–20s; neither is an official API).
 - Reselling tokens, shared/pooled credentials, bypassing paywalls.
 - Vision/file/image-gen parity in v1 (scaffolded, not wired).
-- Multi-tenant shared browsers: one tenant = one Chromium = one login, always.
+- Multi-tenant shared sessions: one tenant = one account/login, always.
 
 ## 3. Users
 
@@ -48,10 +49,14 @@ ChatGPT / Claude / Qwen / DeepSeek / Kimi login — no API keys, session stays i
 
 ## 5. Feature set
 
-### Shipped (v0.1–v0.3)
+### Shipped (v0.1–v0.5)
 - 5 providers (chatgpt, claude, qwen, deepseek, kimi) + `PROVIDER=all` pooled mode.
-- `POST /v1/chat/completions` (JSON + emulated SSE), prompt-injected tool calling,
-  session continuity (`X-Session-Id`), `/v1/refresh`, `/v1/models`, `/health`.
+- **Transport layer (spec 011):** `TRANSPORT=auto|dom|webapi`. Browserless qwen
+  web-API transport (18 MB, 3–5x faster, prefix caching), startup + opt-in
+  request fallback to the browser, `chimera_transport_fallback_total`.
+- `POST /v1/chat/completions` (JSON + emulated SSE with tool-call deltas),
+  prompt-injected tool calling, session continuity (`X-Session-Id`),
+  `/v1/refresh`, `/v1/models`, `/health`.
 - Auth: Bearer / `x-api-key` / `anthropic-api-key`; global rate limit; body caps;
   lock timeouts (no infinite hangs); pre-flight long-prompt guard.
 - Telemetry: `/metrics`, `/v1/health/providers`, selector-fallback + echo counters,
@@ -69,15 +74,21 @@ ChatGPT / Claude / Qwen / DeepSeek / Kimi login — no API keys, session stays i
 
 **First run (self-host):** `cp .env.example .env && docker compose up` → open
 `:6080/vnc.html`, log in once → `curl /v1/models` → point SDK at `:8000/v1`. Done.
-**Managed:** signup → private VNC URL → log in → token + dashboard. Re-login nudge
-arrives via health state (`needs_login`), never as a surprise 500.
+**First run (browserless):** export the session once
+(`node scripts/qwenweb-spike/cdp-export.mjs && cp logs/qwen-session.json auth_data/qwen.json`)
+→ `TRANSPORT=auto` serves in seconds with no Chromium; health reports session validity.
+**Managed:** signup → private VNC URL (dom) or one-time export link (webapi) → token
++ dashboard. Re-login/expiry nudge arrives via health state (`needs_login`), never
+as a surprise 500.
 **Agent:** `base_url` swap for full-model use; MCP `chat` tool for escalation use.
 
-## 7. Pricing (starter, per browser — not per token)
+## 7. Pricing (starter, by substrate — not per token)
 
-Hobby $0 self-host · Solo $19/mo (1–2 providers, 5k req) · Team $79/mo
-(`PROVIDER=all`, 50k req, dashboard, priority selector fixes) · Scale custom.
-Full rationale in `docs/SAAS.md`.
+Hobby $0 self-host · **Subscriber API Solo $9–12/mo per account** (browserless,
+10k req) · **Browser Solo $19/mo** (1–2 providers, 5k req, VNC) · **Team $79/mo**
+(auto transport + warm browser fallback, 50k req, dashboard, priority selector
+fixes) · Scale custom. Proposed; owner ratifies after pilot. Full rationale and
+measured basis in `docs/SAAS.md` §4 and `docs/ADR-002-browserless-tier-economics.md`.
 
 ## 8. Success metrics
 
@@ -90,9 +101,15 @@ Full rationale in `docs/SAAS.md`.
 
 - **Vendor ToS / bans:** mitigate with BYOA-only terms, human-behavior pacing,
   cache (fewer loads), honest docs + disclaimer. Never fight detection aggressively.
+  A transport change (ADR-002) improves cost, not legality.
+- **Browserless session custody:** exported cookies/JWT are password-equivalent
+  (~30-day JWT); WAF can challenge without warning; vendor per-account rate limits
+  cap throughput; model-side tool-call confabulation is a live reliability issue
+  (spec 004 hardening; detected + retried, not eliminated).
 - **Selector rot:** fallback radar + packs + eval harness (specs 006/010) make fixes
   config pushes, and the breakage report doubles as marketing.
-- **Latency expectations:** say 5–30s everywhere; position for reasoning steps, not autocomplete.
+- **Latency expectations:** browserless 2–8s, browser 10–20s; position for
+  reasoning/agent steps, not autocomplete.
 
 ## 10. Roadmap checkpoints
 

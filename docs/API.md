@@ -36,7 +36,7 @@ curl -H "Authorization: Bearer chimera" http://localhost:8000/v1/models
 Model IDs: `chimera-chatgpt`, `chimera-claude`, `chimera-qwen`, `chimera-deepseek`. Any `model` sent in chat completions is accepted and logged.
 
 ### `POST /v1/chat/completions`
-Core endpoint. Mirrors OpenAI Chat Completions. Browser round-trip is 5–30s; streaming is emulated after full response.
+Core endpoint. Mirrors OpenAI Chat Completions. Browser round-trip is 10–20s; the browserless qwen transport is 3–8s. Streaming is emulated after full response.
 
 #### Request
 

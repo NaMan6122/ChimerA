@@ -2,6 +2,9 @@
 
 Date: 2026-09-13
 Status: **Proposed** (awaiting ratification by the owner)
+Note: **ADR-002 (browserless transport) revises the billing-unit conclusion in §5
+for tenants served without a browser; the DOM findings in §2 and the legal analysis
+in §4 stand unchanged.**
 Relates to: `docs/TECH_STACK_DECISION.md` (Go/rod, Accepted), `docs/PRD.md` v0.3,
 `docs/SAAS.md`, `specs/010-eval-harness.md`
 Evidence: all latency/throughput numbers below were measured against a live
