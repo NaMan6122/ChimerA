@@ -77,11 +77,24 @@ no selector maintenance, no browser.
 
 ### 4. Fallback policy
 
-`TRANSPORT=auto|dom|webapi|http` (default `auto`): prefer `webapi` when a valid
-session exists; on `WAF blocked` / 401 / 429 retry once, then fall back to `dom`
-and increment `chimera_transport_fallback_total{provider,from,to,reason}`. A
-conversation never switches transport mid-stream (continuity lives on one tab or
-one chat_id).
+`TRANSPORT=auto|dom|webapi` (default `auto`): prefer `webapi` when a valid
+session exists; on `WAF blocked` / 401 / 403 / 429 / 5xx retry once, then fall
+back to `dom` and increment
+`chimera_transport_fallback_total{provider,from,to,reason}` (reasons: `waf`,
+`unauthorized`, `rate_limited`, `http_error`, `init_failed`).
+
+Two fallback modes, because a warm browser costs 1150 MB:
+
+- **Startup fallback (always on in `auto`):** a missing or broken session file
+  falls back to the DOM instead of taking the gateway down (`init_failed`).
+  Explicit `TRANSPORT=webapi` fails fast instead.
+- **Runtime fallback (opt-in `TRANSPORT_FALLBACK=dom`):** keeps Chromium warm
+  next to webapi so request-time WAF/auth failures can switch transports. Without
+  it, webapi failures are returned to the caller and the operator can restart on
+  `TRANSPORT=dom`.
+
+A conversation never switches transport mid-stream; the flattened prompt is
+self-contained, so the fallback transport serves the next turn from scratch.
 
 ### 5. Observability and security
 
@@ -129,12 +142,12 @@ benchmarks it against the live DOM gateway on the same machine/account:
 Shipped:
 - `internal/providers/webapi/qwen/{client,cookies,bxua,fingerprint,session}.go` —
   transport + storage-state load/install/status (LZW golden vectors, httptest SSE)
+- `internal/providers/fallback.go` — retry-once then cross-transport fallback
 - `cmd/chimera/auth.go` — `chimera auth login|import|status` session management
-- `cmd/chimera/main.go` — `TRANSPORT` selection wiring
-- `internal/config/config.go` — `TRANSPORT`, `AUTH_DIR`, `QWEN_WEB_*`
+- `cmd/chimera/main.go` — `TRANSPORT` selection + startup/warm fallback wiring
+- `internal/config/config.go` — `TRANSPORT`, `TRANSPORT_FALLBACK`, `AUTH_DIR`, `QWEN_WEB_*`
+- `internal/telemetry` — `chimera_transport_fallback_total`
 - `.env.example` — new rows
-- `scripts/qwenweb-spike/{main.go,cookies_test.go,cdp-export.mjs}` — spike +
-  CDP session export (evidence for this spec; not shipped in the binary)
 
 Planned (target shape from §1):
 - `internal/providers/transport.go` — explicit AuthSession × Transport interfaces

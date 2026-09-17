@@ -56,6 +56,8 @@ type Config struct {
 	// Transport + auth session material (storage-state files, mode 0600)
 	Transport string
 	AuthDir   string
+	// TransportFallback optionally keeps a second transport warm ("dom").
+	TransportFallback string
 
 	// WebAPI model selection (chat.qwen.ai model id + thinking toggle)
 	QwenWebModel    string
@@ -127,8 +129,9 @@ func Load() (*Config, error) {
 		SlowMo:         time.Duration(getEnvInt("SLOW_MO", 0)) * time.Millisecond,
 
 		// Transport + auth sessions
-		Transport: getEnvStr("TRANSPORT", TransportAuto),
-		AuthDir:   getEnvStr("AUTH_DIR", "./auth_data"),
+		Transport:         getEnvStr("TRANSPORT", TransportAuto),
+		TransportFallback: getEnvStr("TRANSPORT_FALLBACK", ""),
+		AuthDir:           getEnvStr("AUTH_DIR", "./auth_data"),
 
 		// WebAPI model
 		QwenWebModel:    getEnvStr("QWEN_WEB_MODEL", "qwen3.8-max"),
@@ -202,6 +205,12 @@ func Load() (*Config, error) {
 	default:
 		return nil, fmt.Errorf("unsupported transport %q, supported: %s, %s, %s",
 			cfg.Transport, TransportDOM, TransportWebAPI, TransportAuto)
+	}
+	switch cfg.TransportFallback {
+	case "", TransportDOM:
+	default:
+		return nil, fmt.Errorf("unsupported transport fallback %q, supported: %q (or empty)",
+			cfg.TransportFallback, TransportDOM)
 	}
 
 	// Validate provider

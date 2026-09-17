@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"github.com/chimera/chimera/internal/providers/kimi"
 	"github.com/chimera/chimera/internal/providers/qwen"
 	qwenweb "github.com/chimera/chimera/internal/providers/webapi/qwen"
+	"github.com/chimera/chimera/internal/telemetry"
 	"github.com/go-rod/rod"
 )
 
@@ -91,47 +93,76 @@ func main() {
 		}
 		server = api.NewPooledServer(cfg, poolProviders, mutexMap, pool.Browser())
 		log_.Infof("Pool ready: %v", pool.ProviderNames())
-	} else if cfg.UseWebAPI() {
-		// Browserless web-API transport (spec 011): no Chromium at all.
-		log_.Infof("Chimera webapi transport (no browser): session=%s model=%s thinking=%v",
-			cfg.QwenSessionPath(), cfg.QwenWebModel, cfg.QwenWebThinking)
-		web := qwenweb.New(cfg)
-		if err := web.Init(nil, cfg); err != nil {
-			log_.Errorf("webapi transport unavailable: %v", err)
-			log_.Errorf("Create one with: ./chimera auth login (or ./chimera auth import -file logs/qwen-session.json)")
-			os.Exit(1)
-		}
-		server = api.NewServer(cfg, web)
-		if exp, ok := web.SessionExpiry(); ok {
-			days := time.Until(exp).Hours() / 24
-			if days < 7 {
-				log_.Warnf("qwen web session expires in %.1f days — run `chimera auth login` to refresh", days)
-			} else {
-				log_.Infof("qwen web session valid for %.0f more days", days)
-			}
-		} else {
-			log_.Warnf("qwen web session token has no exp claim; expiry unknown")
-		}
-		log_.Infof("Provider %q ready (model=%s, transport=webapi)", web.Name(), web.ModelID())
 	} else {
-		browserMgr = browser.NewManager(cfg)
-		page, err := browserMgr.Launch()
-		if err != nil {
-			log.Fatalf("Failed to launch browser: %v", err)
+		if cfg.UseWebAPI() {
+			// Browserless web-API transport (spec 011). In auto mode a broken
+			// session falls back to the DOM instead of taking the gateway down.
+			log_.Infof("Chimera webapi transport (no browser): session=%s model=%s thinking=%v",
+				cfg.QwenSessionPath(), cfg.QwenWebModel, cfg.QwenWebThinking)
+			web := qwenweb.New(cfg)
+			err := web.Init(nil, cfg)
+			switch {
+			case err == nil:
+				if cfg.TransportFallback == config.TransportDOM {
+					dom, mgr, domErr := launchDOMProvider(cfg)
+					if domErr != nil {
+						log_.Warnf("fallback DOM transport unavailable (%v); running webapi only", domErr)
+						server = api.NewServer(cfg, web)
+					} else {
+						browserMgr = mgr
+						fb := providers.NewFallback(web, dom, webAPIRetryable, webAPIReason)
+						fb.FromTransport, fb.ToTransport = "webapi", "dom"
+						fb.OnFallback = func(from, to, reason string) {
+							telemetry.ObserveTransportFallback(cfg.Provider, from, to, reason)
+							log_.Warnf("transport fallback %s -> %s (%s)", from, to, reason)
+						}
+						server = api.NewServer(cfg, fb)
+					}
+				} else {
+					server = api.NewServer(cfg, web)
+				}
+				if server != nil {
+					if exp, ok := web.SessionExpiry(); ok {
+						days := time.Until(exp).Hours() / 24
+						if days < 7 {
+							log_.Warnf("qwen web session expires in %.1f days — run `chimera auth login` to refresh", days)
+						} else {
+							log_.Infof("qwen web session valid for %.0f more days", days)
+						}
+					} else {
+						log_.Warnf("qwen web session token has no exp claim; expiry unknown")
+					}
+					log_.Infof("Provider %q ready (model=%s, transport=webapi)", web.Name(), web.ModelID())
+				}
+			case cfg.Transport == config.TransportWebAPI:
+				log_.Errorf("webapi transport unavailable: %v", err)
+				log_.Errorf("Export a session with: node scripts/qwenweb-spike/cdp-export.mjs && cp logs/qwen-session.json %s", cfg.QwenSessionPath())
+				os.Exit(1)
+			default:
+				telemetry.ObserveTransportFallback(cfg.Provider, "webapi", "dom", "init_failed")
+				log_.Warnf("webapi transport unavailable (%v); falling back to DOM", err)
+			}
 		}
-		provider := createProvider(cfg, page)
-		if err := provider.Init(page, cfg); err != nil {
-			log_.Infof("Initial provider check failed: %v", err)
-			log_.Info("Browser window is OPEN — please log in manually in the Chromium window.")
-			log_.Info("  • Use email/password, Microsoft, Apple, or magic link")
-			log_.Info("  • DO NOT use Google OAuth (blocked in automation)")
-			log_.Info("  • Waiting up to 5 minutes for login to complete...")
-			waitUntilLoggedIn(provider, 5*time.Minute)
-			log_.Infof("Login detected! Provider %q ready (model=%s)", provider.Name(), provider.ModelID())
-		} else {
-			log_.Infof("Provider %q ready (model=%s)", provider.Name(), provider.ModelID())
+		if server == nil {
+			browserMgr = browser.NewManager(cfg)
+			page, err := browserMgr.Launch()
+			if err != nil {
+				log.Fatalf("Failed to launch browser: %v", err)
+			}
+			provider := createProvider(cfg, page)
+			if err := provider.Init(page, cfg); err != nil {
+				log_.Infof("Initial provider check failed: %v", err)
+				log_.Info("Browser window is OPEN — please log in manually in the Chromium window.")
+				log_.Info("  • Use email/password, Microsoft, Apple, or magic link")
+				log_.Info("  • DO NOT use Google OAuth (blocked in automation)")
+				log_.Info("  • Waiting up to 5 minutes for login to complete...")
+				waitUntilLoggedIn(provider, 5*time.Minute)
+				log_.Infof("Login detected! Provider %q ready (model=%s)", provider.Name(), provider.ModelID())
+			} else {
+				log_.Infof("Provider %q ready (model=%s)", provider.Name(), provider.ModelID())
+			}
+			server = api.NewServer(cfg, provider)
 		}
-		server = api.NewServer(cfg, provider)
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.APIHost, cfg.APIPort)
@@ -210,4 +241,50 @@ func createProviderByName(name string, page *rod.Page, cfg *config.Config) provi
 	default:
 		return chatgpt.NewClient(page, cfg)
 	}
+}
+
+// launchDOMProvider launches Chromium and initializes the DOM provider. Used
+// for the warm webapi->dom fallback (spec 011 §4).
+func launchDOMProvider(cfg *config.Config) (providers.Provider, *browser.Manager, error) {
+	mgr := browser.NewManager(cfg)
+	page, err := mgr.Launch()
+	if err != nil {
+		return nil, mgr, err
+	}
+	provider := createProvider(cfg, page)
+	if err := provider.Init(page, cfg); err != nil {
+		_ = mgr.Close()
+		return nil, nil, fmt.Errorf("DOM provider init: %w", err)
+	}
+	return provider, mgr, nil
+}
+
+// webAPIRetryable classifies webapi failures worth one retry and a fallback.
+func webAPIRetryable(err error) bool {
+	if errors.Is(err, qwenweb.ErrWAF) {
+		return true
+	}
+	var he *qwenweb.HTTPError
+	if errors.As(err, &he) {
+		return he.Retryable()
+	}
+	return false
+}
+
+// webAPIReason maps a failure to a low-cardinality fallback metric label.
+func webAPIReason(err error) string {
+	if errors.Is(err, qwenweb.ErrWAF) {
+		return "waf"
+	}
+	var he *qwenweb.HTTPError
+	if errors.As(err, &he) {
+		switch he.Status {
+		case 401, 403:
+			return "unauthorized"
+		case 429:
+			return "rate_limited"
+		}
+		return "http_error"
+	}
+	return "unknown"
 }
