@@ -34,10 +34,19 @@ Flags:
 // browser. browser.Manager.Launch() already navigates to the provider URL, so
 // each expression simply runs on that origin.
 type authSpec struct {
-	// TokenExpr is JS evaluated in the page, returning the access token.
+	// TokenExpr is JS evaluated in the page, returning the access token. Used by
+	// providers that keep a token in web storage. Ignored when CookieName is set.
 	TokenExpr string
+	// CookieName detects login from an HttpOnly session cookie instead of JS.
+	// document.cookie cannot see HttpOnly cookies, so a JS check for ChatGPT's
+	// __Secure-next-auth.session-token always returns empty and the wait would
+	// time out after a successful login. CDP's Network.getCookies sees them.
+	CookieName string
 	// CookieHost filters collected cookies to the provider's own domains.
 	CookieHost string
+	// Marker is stored as the session's AccessToken for cookie-custody providers
+	// whose bearer is minted on demand.
+	Marker string
 }
 
 var authSpecs = map[string]authSpec{
@@ -59,10 +68,12 @@ var authSpecs = map[string]authSpec{
 		CookieHost: "deepseek",
 	},
 	config.ProviderChatGPT: {
-		// The durable material is the session cookie; the bearer is minted from
-		// it by /api/auth/session, so a missing bearer is not a login failure.
-		TokenExpr:  `() => document.cookie.includes('__Secure-next-auth.session-token') ? 'cookie-session' : ''`,
+		// Cookie custody: the durable credential is the session cookie and the
+		// bearer is minted from it by /api/auth/session, so a missing bearer at
+		// login time is not a failure.
+		CookieName: "__Secure-next-auth.session-token",
 		CookieHost: "chatgpt",
+		Marker:     "cookie-session",
 	},
 }
 
@@ -117,20 +128,41 @@ func authLogin(cfg *config.Config, args []string) {
 	}
 	defer mgr.Close()
 
+	// Wait for the session. Cookie-custody providers are polled through CDP
+	// (HttpOnly cookies are invisible to page JS); the rest are polled in-page.
 	var marker string
 	deadline := time.Now().Add(*timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(3 * time.Second)
-		res, err := page.Eval(spec.TokenExpr)
+
+		cookies, err := page.Cookies([]string{cfg.ProviderURL()})
 		if err != nil {
 			continue
 		}
-		if marker = res.Value.Str(); marker != "" {
+		if spec.CookieName != "" {
+			for _, c := range cookies {
+				if c.Name == spec.CookieName && c.Value != "" {
+					marker = spec.Marker
+					break
+				}
+			}
+		} else {
+			res, err := page.Eval(spec.TokenExpr)
+			if err != nil {
+				continue
+			}
+			marker = res.Value.Str()
+		}
+		if marker != "" {
 			break
 		}
 	}
 	if marker == "" {
-		fmt.Fprintln(os.Stderr, "timed out waiting for login — no session found")
+		if spec.CookieName != "" {
+			fmt.Fprintf(os.Stderr, "timed out waiting for login — no %s cookie\n", spec.CookieName)
+		} else {
+			fmt.Fprintln(os.Stderr, "timed out waiting for login — no session found")
+		}
 		os.Exit(1)
 	}
 
@@ -140,6 +172,8 @@ func authLogin(cfg *config.Config, args []string) {
 		os.Exit(1)
 	}
 	jar := map[string]string{}
+	// Session cookies live on the registrable domain (e.g. .chatgpt.com), so
+	// match the provider host anywhere in the cookie domain rather than by suffix.
 	for _, c := range cookies {
 		if strings.Contains(c.Domain, spec.CookieHost) {
 			jar[c.Name] = c.Value
@@ -150,14 +184,10 @@ func authLogin(cfg *config.Config, args []string) {
 		os.Exit(1)
 	}
 
-	// marker is a real token where the provider stores one, and the literal
-	// "cookie-session" for cookie-custody providers (ChatGPT, whose bearer is
-	// minted on demand). Either way the cookie jar is the durable credential.
-	token := marker
-	if marker == "cookie-session" {
-		token = "cookie-session"
-	}
-	sess := &webapi.Session{AccessToken: token, Cookies: jar}
+	// marker is the provider's real token where it stores one, and a placeholder
+	// for cookie-custody providers (ChatGPT, whose bearer is minted on demand).
+	// Either way the cookie jar is the durable credential.
+	sess := &webapi.Session{AccessToken: marker, Cookies: jar}
 	dst := cfg.SessionPath(cfg.Provider)
 	if err := webapi.WriteSession(sess, dst); err != nil {
 		fmt.Fprintln(os.Stderr, "write session:", err)
