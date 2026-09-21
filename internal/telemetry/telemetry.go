@@ -51,6 +51,7 @@ type Metrics struct {
 	EchoRetry         *prometheus.CounterVec
 	ToolNameReject    *prometheus.CounterVec
 	TransportFallback *prometheus.CounterVec
+	PowSolve          *prometheus.HistogramVec
 	HTTPRequests      *prometheus.CounterVec
 	HTTPDuration      *prometheus.HistogramVec
 	ProviderUp        *prometheus.GaugeVec
@@ -102,6 +103,11 @@ func New() *Metrics {
 		Name: "chimera_transport_fallback_total",
 		Help: "Times a provider transport fell back to a secondary transport (spec 011).",
 	}, []string{"provider", "from", "to", "reason"})
+	m.PowSolve = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "chimera_pow_solve_seconds",
+		Help:    "Time to solve a provider anti-bot proof of work (spec 012).",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+	}, []string{"provider"})
 	m.HTTPRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "chimera_http_requests_total",
 		Help: "HTTP responses by method, path and code.",
@@ -122,7 +128,7 @@ func New() *Metrics {
 	m.reg.MustRegister(
 		m.ChatRequests, m.ResponseDuration, m.ProviderErrors, m.LockWait,
 		m.SelectorFallback, m.EchoRetry, m.ToolNameReject, m.TransportFallback,
-		m.HTTPRequests, m.HTTPDuration,
+		m.PowSolve, m.HTTPRequests, m.HTTPDuration,
 		m.ProviderUp, m.ProviderLastOK,
 	)
 	return m
@@ -252,6 +258,17 @@ func ObserveHTTP(method, path, code string, d time.Duration) {
 // strings like "waf", "unauthorized", "rate_limited", "init_failed".
 func ObserveTransportFallback(provider, from, to, reason string) {
 	Default.TransportFallback.WithLabelValues(provider, from, to, reason).Inc()
+}
+
+// ObservePowSolve records how long a proof-of-work solve took. The solver is the
+// one genuinely new compute path in the browserless transports, so it is worth a
+// histogram of its own: a regression here would otherwise only show up as
+// unexplained latency (spec 012 §6).
+func ObservePowSolve(provider string, d time.Duration) {
+	if d < 0 {
+		return
+	}
+	Default.PowSolve.WithLabelValues(provider).Observe(d.Seconds())
 }
 
 // RecordLoginCheck stores a login-probe result on Default.
