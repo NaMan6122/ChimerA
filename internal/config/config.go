@@ -277,11 +277,19 @@ func (c *Config) SessionPath(provider string) string {
 // QwenSessionPath returns the storage-state file for the qwen web transport.
 func (c *Config) QwenSessionPath() string { return c.SessionPath(ProviderQwen) }
 
-// webAPIProviders are the providers with a browserless transport (spec 012).
+// webAPIProviders are the providers with a working browserless transport
+// (spec 012).
+//
+// ChatGPT is deliberately absent. Its web transport is implemented and committed,
+// but a live turn proved it cannot work: the turn endpoint requires an
+// OpenAI-Sentinel-Turnstile-Token produced by the Sentinel VM, and every
+// programmatic request without one is rejected with 403 "Unusual activity",
+// including requests issued from inside the authenticated page. Reproducing it
+// needs a JavaScript engine — see spec 012 §3 — so ChatGPT stays on the DOM
+// transport until a live programmatic turn succeeds.
 var webAPIProviders = map[string]bool{
 	ProviderQwen:     true,
 	ProviderDeepSeek: true,
-	ProviderChatGPT:  true,
 }
 
 // UseWebAPI reports whether the browserless transport should be used for the
