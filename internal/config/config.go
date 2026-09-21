@@ -63,6 +63,11 @@ type Config struct {
 	QwenWebModel    string
 	QwenWebThinking bool
 
+	// WebAPI model selection for the other browserless transports (spec 012)
+	DeepSeekWebModel    string
+	DeepSeekWebThinking bool
+	ChatGPTWebModel     string
+
 	// Provider URLs
 	ChatGPTURL  string
 	ClaudeURL   string
@@ -133,9 +138,13 @@ func Load() (*Config, error) {
 		TransportFallback: getEnvStr("TRANSPORT_FALLBACK", ""),
 		AuthDir:           getEnvStr("AUTH_DIR", "./auth_data"),
 
-		// WebAPI model
+		// WebAPI models
 		QwenWebModel:    getEnvStr("QWEN_WEB_MODEL", "qwen3.8-max"),
 		QwenWebThinking: getEnvBool("QWEN_WEB_THINKING", true),
+
+		DeepSeekWebModel:    getEnvStr("DEEPSEEK_WEB_MODEL", "deepseek-chat"),
+		DeepSeekWebThinking: getEnvBool("DEEPSEEK_WEB_THINKING", true),
+		ChatGPTWebModel:     getEnvStr("CHATGPT_WEB_MODEL", "auto"),
 
 		// Provider URLs
 		ChatGPTURL:  getEnvStr("CHATGPT_URL", "https://chatgpt.com"),
@@ -259,23 +268,35 @@ func (c *Config) ProviderURLs() map[string]string {
 // IsPooled returns true if Provider is "all" (single Chromium with page per provider).
 func (c *Config) IsPooled() bool { return c.Provider == ProviderAll }
 
-// QwenSessionPath returns the storage-state file for the qwen web transport.
-func (c *Config) QwenSessionPath() string {
-	return filepath.Join(c.AuthDir, "qwen.json")
+// SessionPath returns the storage-state file for a provider's browserless
+// transport. Sessions are password-equivalent and kept one file per provider.
+func (c *Config) SessionPath(provider string) string {
+	return filepath.Join(c.AuthDir, provider+".json")
 }
 
-// UseWebAPI reports whether the qwen web transport must be used. In auto mode
-// it is preferred when an auth session file has been exported; otherwise the
-// gateway falls back to the browser. Non-qwen providers always use the DOM.
+// QwenSessionPath returns the storage-state file for the qwen web transport.
+func (c *Config) QwenSessionPath() string { return c.SessionPath(ProviderQwen) }
+
+// webAPIProviders are the providers with a browserless transport (spec 012).
+var webAPIProviders = map[string]bool{
+	ProviderQwen:     true,
+	ProviderDeepSeek: true,
+	ProviderChatGPT:  true,
+}
+
+// UseWebAPI reports whether the browserless transport should be used for the
+// configured provider. In auto mode it is preferred when an auth session file
+// has been exported; otherwise the gateway falls back to the browser. Providers
+// without a webapi transport always use the DOM.
 func (c *Config) UseWebAPI() bool {
-	if c.Provider != ProviderQwen {
+	if !webAPIProviders[c.Provider] {
 		return false
 	}
 	switch c.Transport {
 	case TransportWebAPI:
 		return true
 	case TransportAuto:
-		_, err := os.Stat(c.QwenSessionPath())
+		_, err := os.Stat(c.SessionPath(c.Provider))
 		return err == nil
 	default:
 		return false

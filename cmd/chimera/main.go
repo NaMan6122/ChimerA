@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -26,7 +25,8 @@ import (
 	"github.com/chimera/chimera/internal/providers/deepseek"
 	"github.com/chimera/chimera/internal/providers/kimi"
 	"github.com/chimera/chimera/internal/providers/qwen"
-	qwenweb "github.com/chimera/chimera/internal/providers/webapi/qwen"
+	"github.com/chimera/chimera/internal/providers/webapi"
+	_ "github.com/chimera/chimera/internal/providers/webapi/all"
 	"github.com/chimera/chimera/internal/telemetry"
 	"github.com/go-rod/rod"
 )
@@ -95,52 +95,52 @@ func main() {
 		log_.Infof("Pool ready: %v", pool.ProviderNames())
 	} else {
 		if cfg.UseWebAPI() {
-			// Browserless web-API transport (spec 011). In auto mode a broken
+			// Browserless web-API transport (specs 011/012). In auto mode a broken
 			// session falls back to the DOM instead of taking the gateway down.
-			log_.Infof("Chimera webapi transport (no browser): session=%s model=%s thinking=%v",
-				cfg.QwenSessionPath(), cfg.QwenWebModel, cfg.QwenWebThinking)
-			web := qwenweb.New(cfg)
-			err := web.Init(nil, cfg)
-			switch {
-			case err == nil:
-				if cfg.TransportFallback == config.TransportDOM {
-					dom, mgr, domErr := launchDOMProvider(cfg)
-					if domErr != nil {
-						log_.Warnf("fallback DOM transport unavailable (%v); running webapi only", domErr)
-						server = api.NewServer(cfg, web)
-					} else {
-						browserMgr = mgr
-						fb := providers.NewFallback(web, dom, webAPIRetryable, webAPIReason)
-						fb.FromTransport, fb.ToTransport = "webapi", "dom"
-						fb.OnFallback = func(from, to, reason string) {
-							telemetry.ObserveTransportFallback(cfg.Provider, from, to, reason)
-							log_.Warnf("transport fallback %s -> %s (%s)", from, to, reason)
-						}
-						server = api.NewServer(cfg, fb)
-					}
-				} else {
-					server = api.NewServer(cfg, web)
+			ctor, ok := webapi.Lookup(cfg.Provider)
+			if !ok {
+				log_.Errorf("provider %q has no browserless transport (registered: %v)", cfg.Provider, webapi.Registered())
+				if cfg.Transport == config.TransportWebAPI {
+					os.Exit(1)
 				}
-				if server != nil {
-					if exp, ok := web.SessionExpiry(); ok {
-						days := time.Until(exp).Hours() / 24
-						if days < 7 {
-							log_.Warnf("qwen web session expires in %.1f days — run `chimera auth login` to refresh", days)
-						} else {
-							log_.Infof("qwen web session valid for %.0f more days", days)
-						}
-					} else {
-						log_.Warnf("qwen web session token has no exp claim; expiry unknown")
-					}
-					log_.Infof("Provider %q ready (model=%s, transport=webapi)", web.Name(), web.ModelID())
-				}
-			case cfg.Transport == config.TransportWebAPI:
-				log_.Errorf("webapi transport unavailable: %v", err)
-				log_.Errorf("Export a session with: node scripts/qwenweb-spike/cdp-export.mjs && cp logs/qwen-session.json %s", cfg.QwenSessionPath())
-				os.Exit(1)
-			default:
 				telemetry.ObserveTransportFallback(cfg.Provider, "webapi", "dom", "init_failed")
-				log_.Warnf("webapi transport unavailable (%v); falling back to DOM", err)
+			} else {
+				log_.Infof("Chimera webapi transport (no browser): provider=%s session=%s",
+					cfg.Provider, cfg.SessionPath(cfg.Provider))
+				web := ctor(cfg)
+				err := web.Init(nil, cfg)
+				switch {
+				case err == nil:
+					if cfg.TransportFallback == config.TransportDOM {
+						dom, mgr, domErr := launchDOMProvider(cfg)
+						if domErr != nil {
+							log_.Warnf("fallback DOM transport unavailable (%v); running webapi only", domErr)
+							server = api.NewServer(cfg, web)
+						} else {
+							browserMgr = mgr
+							fb := providers.NewFallback(web, dom, webapi.Retryable, webapi.Reason)
+							fb.FromTransport, fb.ToTransport = "webapi", "dom"
+							fb.OnFallback = func(from, to, reason string) {
+								telemetry.ObserveTransportFallback(cfg.Provider, from, to, reason)
+								log_.Warnf("transport fallback %s -> %s (%s)", from, to, reason)
+							}
+							server = api.NewServer(cfg, fb)
+						}
+					} else {
+						server = api.NewServer(cfg, web)
+					}
+					if server != nil {
+						logSessionExpiry(web)
+						log_.Infof("Provider %q ready (model=%s, transport=webapi)", web.Name(), web.ModelID())
+					}
+				case cfg.Transport == config.TransportWebAPI:
+					log_.Errorf("webapi transport unavailable: %v", err)
+					log_.Errorf("Export a session with: node scripts/webapi-spike/cdp-capture.mjs %s", cfg.Provider)
+					os.Exit(1)
+				default:
+					telemetry.ObserveTransportFallback(cfg.Provider, "webapi", "dom", "init_failed")
+					log_.Warnf("webapi transport unavailable (%v); falling back to DOM", err)
+				}
 			}
 		}
 		if server == nil {
@@ -259,32 +259,26 @@ func launchDOMProvider(cfg *config.Config) (providers.Provider, *browser.Manager
 	return provider, mgr, nil
 }
 
-// webAPIRetryable classifies webapi failures worth one retry and a fallback.
-func webAPIRetryable(err error) bool {
-	if errors.Is(err, qwenweb.ErrWAF) {
-		return true
+// logSessionExpiry warns when a browserless session is close to expiry. It is
+// best-effort: only transports that expose SessionExpiry report anything.
+func logSessionExpiry(p providers.Provider) {
+	r, ok := p.(interface{ SessionExpiry() (time.Time, bool) })
+	if !ok {
+		return
 	}
-	var he *qwenweb.HTTPError
-	if errors.As(err, &he) {
-		return he.Retryable()
+	exp, has := r.SessionExpiry()
+	if !has {
+		log_.Warnf("%s web session token has no exp claim; expiry unknown", p.Name())
+		return
 	}
-	return false
+	days := time.Until(exp).Hours() / 24
+	if days < 7 {
+		log_.Warnf("%s web session expires in %.1f days — run `chimera auth login` to refresh", p.Name(), days)
+	} else {
+		log_.Infof("%s web session valid for %.0f more days", p.Name(), days)
+	}
 }
 
-// webAPIReason maps a failure to a low-cardinality fallback metric label.
-func webAPIReason(err error) string {
-	if errors.Is(err, qwenweb.ErrWAF) {
-		return "waf"
-	}
-	var he *qwenweb.HTTPError
-	if errors.As(err, &he) {
-		switch he.Status {
-		case 401, 403:
-			return "unauthorized"
-		case 429:
-			return "rate_limited"
-		}
-		return "http_error"
-	}
-	return "unknown"
-}
+// webapi.Retryable / webapi.Reason (internal/providers/webapi) classify webapi
+// failures for the retry-and-fallback path; every transport shares one
+// vocabulary (spec 012).

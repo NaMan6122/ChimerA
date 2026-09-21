@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chimera/chimera/internal/providers/webapi"
 )
 
 // BaseURL is the chat.qwen.ai origin; overridable in tests.
@@ -23,34 +24,18 @@ const (
 	userAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 )
 
+// The session type and the retry/fallback error vocabulary are shared with every
+// other browserless transport (internal/providers/webapi, spec 012). They are
+// re-exported here under their old names so the qwen call sites and tests read
+// unchanged.
+type (
+	Session   = webapi.Session
+	HTTPError = webapi.HTTPError
+)
+
 // ErrWAF marks an Alibaba anti-bot challenge. Callers may fall back to the DOM
 // transport (spec 011 §4).
-var ErrWAF = errors.New("waf challenge")
-
-// HTTPError is a non-2xx response from the qwen web API.
-type HTTPError struct {
-	Status int
-	Body   string
-}
-
-func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body) }
-
-// Retryable reports whether the failure may succeed on another transport.
-func (e *HTTPError) Retryable() bool {
-	switch e.Status {
-	case 401, 403, 429, 500, 502, 503, 504:
-		return true
-	}
-	return false
-}
-
-// Session is the storage-state material exported from a logged-in browser.
-// It is password-equivalent: keep the file owner-only and never log it.
-// Loading, expiry, and installation live in session.go.
-type Session struct {
-	AccessToken string            `json:"access_token"`
-	Cookies     map[string]string `json:"cookies"`
-}
+var ErrWAF = webapi.ErrWAF
 
 // Client is a low-level chat.qwen.ai web API client.
 type Client struct {
