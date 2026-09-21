@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/chimera/chimera/internal/config"
+	"github.com/chimera/chimera/internal/logging"
 	"github.com/chimera/chimera/internal/models"
 	"github.com/chimera/chimera/internal/providers"
 	"github.com/go-rod/rod"
@@ -18,6 +19,7 @@ type Provider struct {
 	cfg    *config.Config
 	client *Client
 	sess   *Session
+	log    *logging.Logger
 
 	mu    sync.Mutex
 	convs map[string]convState
@@ -30,7 +32,11 @@ type convState struct {
 
 // New returns an uninitialized web transport; call Init before serving.
 func New(cfg *config.Config) *Provider {
-	return &Provider{cfg: cfg, convs: map[string]convState{}}
+	return &Provider{
+		cfg:   cfg,
+		convs: map[string]convState{},
+		log:   logging.New("qwen-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
+	}
 }
 
 // Name is the provider identifier; telemetry and routing keep using "qwen".
@@ -79,19 +85,49 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 		return nil, err
 	}
 
+	p.mu.Lock()
 	parent := res.ResponseID
 	if parent == "" {
 		parent = conv.parentID
 	}
-	p.mu.Lock()
 	p.convs[threadID] = convState{chatID: conv.chatID, parentID: parent}
 	p.mu.Unlock()
+
+	// Per-turn usage for latency/token reporting (parsed by scripts/latency_probe.py).
+	in := usageInt(res.Usage, "input_tokens")
+	out := usageInt(res.Usage, "output_tokens")
+	cached := 0
+	if details, ok := res.Usage["prompt_tokens_details"].(map[string]any); ok {
+		cached = usageInt(details, "cached_tokens")
+	}
+	gen := res.Duration - res.TTFT
+	tps := 0.0
+	if gen > 0 && out > 0 {
+		tps = float64(out) / gen.Seconds()
+	}
+	p.log.Infof("turn done chat=%s prompt_chars=%d in=%d out=%d cached=%d ttft_ms=%d total_ms=%d gen_ms=%d out_tok_s=%.1f reasoning_chars=%d",
+		shortID(conv.chatID), len(text), in, out, cached,
+		res.TTFT.Milliseconds(), res.Duration.Milliseconds(), gen.Milliseconds(), tps, len(res.Reasoning))
 
 	return &models.ProviderResponse{
 		Message:   res.Content,
 		ThreadID:  threadID,
 		ElapsedMs: time.Since(start).Milliseconds(),
 	}, nil
+}
+
+func usageInt(u map[string]any, key string) int {
+	if v, ok := u[key].(float64); ok {
+		return int(v)
+	}
+	return 0
+}
+
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // NewChat forgets every conversation so the next turn starts fresh.
