@@ -41,7 +41,14 @@ type authSpec struct {
 	// document.cookie cannot see HttpOnly cookies, so a JS check for ChatGPT's
 	// __Secure-next-auth.session-token always returns empty and the wait would
 	// time out after a successful login. CDP's Network.getCookies sees them.
+	//
+	// Matched as a PREFIX, not an exact name: NextAuth chunks a session cookie
+	// that exceeds ~4KB into <name>.0, <name>.1, … . ChatGPT's session is large
+	// enough to be split, so the bare name never exists and an exact match would
+	// never fire.
 	CookieName string
+	// CookiePrefix, when true, matches CookieName as a prefix (see above).
+	CookiePrefix bool
 	// CookieHost filters collected cookies to the provider's own domains.
 	CookieHost string
 	// Marker is stored as the session's AccessToken for cookie-custody providers
@@ -71,9 +78,10 @@ var authSpecs = map[string]authSpec{
 		// Cookie custody: the durable credential is the session cookie and the
 		// bearer is minted from it by /api/auth/session, so a missing bearer at
 		// login time is not a failure.
-		CookieName: "__Secure-next-auth.session-token",
-		CookieHost: "chatgpt",
-		Marker:     "cookie-session",
+		CookieName:   "__Secure-next-auth.session-token",
+		CookiePrefix: true,
+		CookieHost:   "chatgpt",
+		Marker:       "cookie-session",
 	},
 }
 
@@ -141,7 +149,16 @@ func authLogin(cfg *config.Config, args []string) {
 		}
 		if spec.CookieName != "" {
 			for _, c := range cookies {
-				if c.Name == spec.CookieName && c.Value != "" {
+				name := c.Name
+				if spec.CookiePrefix {
+					name = strings.TrimPrefix(name, spec.CookieName)
+					if name == c.Name || !(name == "" || strings.HasPrefix(name, ".")) {
+						continue
+					}
+				} else if name != spec.CookieName {
+					continue
+				}
+				if c.Value != "" {
 					marker = spec.Marker
 					break
 				}

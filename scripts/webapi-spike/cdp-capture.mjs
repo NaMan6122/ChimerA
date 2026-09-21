@@ -44,7 +44,11 @@ const PROVIDERS = {
     paths: [
       "/backend-api/conversation",
       "/backend-api/sentinel/chat-requirements",
+      "/backend-api/sentinel/req",
       "/backend-api/f/conversation",
+      // Mints the bearer from the session cookie; its response shape is needed
+      // to reconcile the token refresh path.
+      "/api/auth/session",
     ],
     // ChatGPT's bearer is minted from the cookie by /api/auth/session.
     tokenExpr: `fetch('/api/auth/session').then(r=>r.json()).then(j=>(j&&j.accessToken)||'').catch(()=>'')`,
@@ -95,6 +99,28 @@ const b64json = (s) => {
   }
 };
 
+// Summarize a body's shape without dumping its contents to the terminal. Values
+// live only in the 0600 capture file.
+const bodyShape = (body) => {
+  if (!body) return "(none)";
+  const t = String(body).trim();
+  if (t.startsWith("<")) return `HTML ${t.length}b (challenge?)`;
+  if (t.startsWith("{") || t.startsWith("[")) {
+    try {
+      const j = JSON.parse(t);
+      const keys = Array.isArray(j) ? [`[${j.length}]`] : Object.keys(j);
+      return `JSON keys=[${keys.slice(0, 24).join(",")}]`;
+    } catch {
+      /* fall through to the generic form */
+    }
+  }
+  if (/^(event:|data:)/m.test(t)) {
+    const lines = t.split("\n").filter((l) => l.startsWith("data:"));
+    return `SSE ${lines.length} data line(s), ${t.length}b`;
+  }
+  return `${t.length}b`;
+};
+
 // Report a header's shape without leaking its value.
 const shape = (name, value) => {
   if (value == null) return `${name}: (absent)`;
@@ -129,7 +155,10 @@ const byRequest = new Map();
 
 const matches = (url) => conf.paths.some((p) => url.includes(p));
 
-const onEvent = (msg) => {
+// Bodies are truncated so a long completion does not bloat the capture file.
+const MAX_BODY = 20000;
+
+const onEvent = async (msg) => {
   if (msg.method === "Network.requestWillBeSent") {
     const { requestId, request } = msg.params;
     if (!matches(request.url)) return;
@@ -140,6 +169,7 @@ const onEvent = (msg) => {
       postData: request.postData ?? null,
       status: null,
       respHeaders: null,
+      respBody: null,
     };
     captures.push(rec);
     byRequest.set(requestId, rec);
@@ -149,7 +179,27 @@ const onEvent = (msg) => {
     if (!rec) return;
     rec.status = msg.params.response.status;
     rec.respHeaders = msg.params.response.headers;
+    rec.mimeType = msg.params.response.mimeType;
     console.log(`[resp] ${msg.params.response.status} ${rec.url}`);
+  } else if (msg.method === "Network.loadingFinished") {
+    // Response bodies are the point of this capture for a handshake-heavy
+    // provider: ChatGPT's Sentinel reply carries the proof seed and the
+    // turnstile flag, which are unguessable from the request side alone.
+    const rec = byRequest.get(msg.params.requestId);
+    if (!rec || rec.respBody !== null) return;
+    try {
+      const { body, base64Encoded } = await send("Network.getResponseBody", {
+        requestId: msg.params.requestId,
+      });
+      rec.respBody = base64Encoded
+        ? `<base64 ${body.length} chars>`
+        : body.slice(0, MAX_BODY);
+      if (!base64Encoded && body.length > MAX_BODY) rec.respBodyTruncated = true;
+    } catch (e) {
+      // A streamed or already-evicted response can refuse; record why rather
+      // than silently leaving a hole.
+      rec.respBody = `<unavailable: ${e.message}>`;
+    }
   }
 };
 
@@ -231,8 +281,10 @@ ws.onopen = async () => {
         if (c.headers[h.toLowerCase()] != null) console.log("  " + shape(h, c.headers[h.toLowerCase()]));
       }
       if (c.postData) {
-        const body = JSON.parse(c.postData);
-        console.log(`  body keys: [${Object.keys(body).join(",")}]`);
+        console.log(`  req body: ${bodyShape(c.postData)}`);
+      }
+      if (c.respBody) {
+        console.log(`  resp body: ${bodyShape(c.respBody)}`);
       }
     }
     const ct = captures.flatMap((c) => Object.entries(c.respHeaders || {})).find(([k]) => k.toLowerCase() === "content-type");
