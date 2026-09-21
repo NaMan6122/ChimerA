@@ -9,8 +9,15 @@ import (
 	"github.com/chimera/chimera/internal/logging"
 	"github.com/chimera/chimera/internal/models"
 	"github.com/chimera/chimera/internal/providers"
+	"github.com/chimera/chimera/internal/providers/webapi"
 	"github.com/go-rod/rod"
 )
+
+func init() {
+	webapi.Register(config.ProviderQwen, func(cfg *config.Config) providers.Provider {
+		return New(cfg)
+	})
+}
 
 // Provider implements providers.Provider on top of the qwen web API, with no
 // browser. It is selected when TRANSPORT=webapi, or TRANSPORT=auto with an
@@ -48,7 +55,7 @@ func (p *Provider) ModelID() string { return "chimera-qwen" }
 // Init loads the storage-state session. The rod.Page argument is unused (the
 // interface still carries it until spec 011's transport split lands).
 func (p *Provider) Init(_ *rod.Page, cfg *config.Config) error {
-	sess, err := LoadSession(cfg.QwenSessionPath())
+	sess, err := webapi.LoadSession(cfg.QwenSessionPath())
 	if err != nil {
 		return err
 	}

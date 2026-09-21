@@ -1,4 +1,4 @@
-package qwenweb
+package webapi
 
 import (
 	"encoding/base64"
@@ -9,6 +9,13 @@ import (
 	"strings"
 	"time"
 )
+
+// Session is the storage-state material exported from a logged-in browser. It is
+// password-equivalent: keep the file owner-only and never log it.
+type Session struct {
+	AccessToken string            `json:"access_token"`
+	Cookies     map[string]string `json:"cookies"`
+}
 
 // LoadSession reads a storage-state file. The access token is required; cookie
 // material is required in practice too (token-only sessions are WAF-rejected).

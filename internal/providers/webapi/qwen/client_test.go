@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/chimera/chimera/internal/config"
+	"github.com/chimera/chimera/internal/providers/webapi"
 )
 
 func testServer(t *testing.T) *httptest.Server {
@@ -192,5 +193,19 @@ func TestProviderImplementsSessionCheck(t *testing.T) {
 	p.client = c
 	if ok, err := p.IsLoggedIn(); err != nil || !ok {
 		t.Fatalf("IsLoggedIn = %v, %v", ok, err)
+	}
+}
+
+// qwen must register itself with the webapi registry. Without this the gateway
+// silently falls through to launching Chromium: auto mode treats a missing
+// constructor as an init failure rather than an error, so the regression is
+// invisible except as a ~10x latency and ~64x memory change.
+func TestRegistryHasQwen(t *testing.T) {
+	c, ok := webapi.Lookup(config.ProviderQwen)
+	if !ok {
+		t.Fatal("qwen not registered with the webapi registry")
+	}
+	if p := c(&config.Config{QwenWebModel: "qwen3.8-max"}); p.Name() != config.ProviderQwen {
+		t.Fatalf("constructor built provider %q, want %q", p.Name(), config.ProviderQwen)
 	}
 }

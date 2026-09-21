@@ -1,4 +1,4 @@
-package qwenweb
+package webapi
 
 import (
 	"encoding/base64"
