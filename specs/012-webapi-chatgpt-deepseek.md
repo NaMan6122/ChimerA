@@ -164,39 +164,89 @@ Three traps that each silently truncate the answer rather than erroring:
 Usage comes from the response-level BATCH (`accumulated_token_usage`), and
 completion is signalled by `quasi_status`/`status` → `FINISHED`.
 
-### 3. ChatGPT (`internal/providers/webapi/chatgpt`)
+### 3. ChatGPT (`internal/providers/webapi/chatgpt`) — **BLOCKED, do not ship**
 
-Auth: `__Secure-next-auth.session-token` cookie → `GET /api/auth/session` →
-short-lived bearer (refreshable without a browser).
+**Status: the transport as written cannot work. Verified live 2026-09-22.**
 
-Sentinel handshake per turn:
-
-- `POST /backend-api/sentinel/chat-requirements/prepare` → `{token, proofofwork
-  {required, seed, difficulty}, turnstile {required, dx}, so {required, collect}}`
-- solve PoW (§3.1); `POST /backend-api/sentinel/chat-requirements` → final
-  `chat-requirements-token`
-- `POST /backend-api/conversation` — SSE with `delta_encoding: v1` patch stream
-  (`{"p":"…","o":"append","v":"…"}` then `{"v":"…"}`), body carries `action`,
-  `model`, `messages`, `parent_message_id`, `conversation_id`.
-- `POST /backend-api/f/conversation/prepare` supplies `x-conduit-token` (warm-up).
-
-Headers: `openai-sentinel-chat-requirements-token`, `openai-sentinel-proof-token`,
-`oai-device-id`, `oai-client-version`, `oai-language`, browser UA.
-
-#### 3.1 Proof of work — Sentinel
+A real login was completed and a real turn was sent from the Chromium window; the
+app's own `POST /backend-api/f/conversation` returned **200**. Every programmatic
+turn — issued from *inside that same authenticated page* via `fetch()`, so with
+real cookies, real TLS and a real browser context — returned:
 
 ```
-i in [0, 500_000):  FNV-1a( seed ‖ byte(difficulty) ‖ be32(i) ‖ config ) < 1<<(32-difficulty)
-token = "gAAAAAB" + base64(be32(result))
+403 {"detail":"Unusual activity has been detected from your device. Try again later."}
 ```
 
-`config` is a client-constructed browser-fingerprint string (static, not read from
-a live browser). Pure Go, ~15 lines; the reference is gpt4free's `sentinel.py`.
+That 403 persisted across every variation tried, so it is not a missing header or
+a wrong token:
 
-**Turnstile:** treated as advisory. `turnstile.required: true` does not block the
-conversation endpoint when PoW + requirements-token are valid for a session whose
-cookie jar was earned in Chromium. A per-account hard requirement is an accepted
-failure mode that falls back to DOM (§5).
+| attempt | result |
+|---|---|
+| bare (cookies only) | 403 |
+| `+ Authorization: Bearer <accessToken>` | 403 |
+| `+ oai-device-id`, `oai-language` | 403 |
+| `+ prepare/finalize sentinel token` | 403 |
+| `+ x-conduit-token` (from the prepare body) | 403 |
+| the app's own turn | **200** |
+
+The session is not globally blocked: `GET /api/auth/session` and
+`GET /backend-api/conversations` both return 200 from the same page.
+
+#### What the live handshake actually returned
+
+The researched model does not match this account:
+
+- `POST /sentinel/chat-requirements/prepare` → 200
+  `{"persona":"chatgpt-noauth","prepare_token":"gAAAAAB…"}`
+- `POST /sentinel/chat-requirements` → 200
+  `{"persona":"chatgpt-noauth","token":"gAAAAAB…"}`
+- `POST /sentinel/chat-requirements/finalize` → **500** on an empty body
+- `POST /backend-api/f/conversation/prepare` → 200, conduit token in the
+  **response body** (`conduit_token`), not a header
+
+There is **no `proofofwork` and no `turnstile` field** in either response, so
+§3.1's FNV-1a solver has nothing to solve on this surface. `persona` is
+`chatgpt-noauth`, and `finalize` — the step that mints the token the turn
+actually consumes — rejects a body that does not carry the environment material
+the app's obfuscated JS collects.
+
+#### The captured turn closes the question
+
+The app's own successful `POST /backend-api/f/conversation` was captured with
+request headers. It carries three Sentinel tokens, and the one that matters:
+
+| header | size | required? |
+|---|---|---|
+| `OpenAI-Sentinel-Turnstile-Token` | **3452 chars** | **yes — present on the successful turn** |
+| `OpenAI-Sentinel-Proof-Token` | 645 chars | yes |
+| `OpenAI-Sentinel-Chat-Requirements-Token` | 2596 chars | yes |
+| `X-OAI-IS-Client-Observation` | `v1.s.p.ohu763QL-Y8re79R` | yes (the `so.collect` fingerprint) |
+| `OAI-Echo-Logs`, `OAI-Telemetry`, `x-oai-turn-trace-id` | — | behavioural telemetry |
+| `Authorization` | 2108 chars | yes |
+
+**Turnstile is required, and this refutes the premise of §3.1 and §3.** The
+"Turnstile is advisory for a session with a browser-earned cookie jar" claim —
+which this whole transport was built on, from a single secondary source — is
+wrong for this account. The app proves the opposite by sending a 3452-char
+Turnstile token on every turn, and every programmatic attempt that omitted it
+(including from inside the authenticated page, with real cookies and bearer)
+returned `403 Unusual activity has been detected from your device`.
+
+That token is produced by the Sentinel **environment/VM** step: the obfuscated
+client JS that `finalize` expects and that returned 500 when called without it.
+
+#### Conclusion
+
+**The transport cannot work, and the reason is structural, not a bug to fix.**
+Reproducing it needs a JavaScript engine to run the Sentinel VM (and Turnstile
+bytecode) — the dependency this design set out to avoid. Adding one would mean
+embedding a JS runtime and tracking an actively-obfuscated VM, which is strictly
+worse than the DOM transport it replaces for a provider already served by DOM.
+
+**Decision: ChatGPT stays on the DOM transport.** The code is committed for the
+record but `config.webAPIProviders` excludes it, so `TRANSPORT=auto` cannot select
+it. Do not advertise it, and do not re-enable it without a live programmatic turn
+that succeeds — which is the acceptance criterion this provider never met.
 
 ### 4. Auth: multi-vendor `chimera auth`
 

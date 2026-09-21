@@ -59,6 +59,11 @@ const PROVIDERS = {
       "openai-sentinel-turnstile-token",
     ],
     echoHeaders: ["oai-device-id", "oai-client-version", "oai-language", "x-conduit-token"],
+    // The real turn is the frontend alias, not /backend-api/conversation, and it
+    // does NOT carry a sentinel token — so completion cannot be detected from a
+    // header. Treat the endpoint itself as the signal.
+    isTurn: (u) =>
+      u.includes("/backend-api/f/conversation") || /\/backend-api\/conversation$/.test(u),
   },
 };
 
@@ -88,7 +93,6 @@ function resolvePort() {
 
 const PORT = resolvePort();
 const WAIT_SECONDS = Number(process.env.WAIT_SECONDS || 180);
-const OUT = process.env.OUT || `logs/${provider}-capture.json`;
 const SESSION_OUT = process.env.SESSION_OUT || `logs/${provider}-session.json`;
 
 const b64json = (s) => {
@@ -155,6 +159,27 @@ const byRequest = new Map();
 
 const matches = (url) => conf.paths.some((p) => url.includes(p));
 
+// Write the capture file. Called after every body lands as well as at the end:
+// a handshake-heavy provider can take many turns to satisfy a header-based stop
+// condition, and holding everything in memory until the deadline means a kill or
+// a timeout loses the whole round. Writing incrementally makes that impossible.
+//
+// exportedAt is declared here, above its first reader: flushCapture runs from the
+// CDP event handler, which can fire before later top-level statements execute.
+const exportedAt = new Date().toISOString();
+const OUT = process.env.OUT || `logs/${provider}-capture.json`;
+let wroteOnce = false;
+const flushCapture = () => {
+  try {
+    writeFileSync(OUT, JSON.stringify({ exported_at: exportedAt, captures }, null, 2), {
+      mode: 0o600,
+    });
+    wroteOnce = true;
+  } catch (e) {
+    console.error("capture flush failed:", e.message);
+  }
+};
+
 // Bodies are truncated so a long completion does not bloat the capture file.
 const MAX_BODY = 20000;
 
@@ -195,10 +220,12 @@ const onEvent = async (msg) => {
         ? `<base64 ${body.length} chars>`
         : body.slice(0, MAX_BODY);
       if (!base64Encoded && body.length > MAX_BODY) rec.respBodyTruncated = true;
+      flushCapture();
     } catch (e) {
       // A streamed or already-evicted response can refuse; record why rather
       // than silently leaving a hole.
       rec.respBody = `<unavailable: ${e.message}>`;
+      flushCapture();
     }
   }
 };
@@ -214,8 +241,6 @@ ws.onmessage = (ev) => {
   }
 };
 
-const exportedAt = new Date().toISOString();
-
 ws.onopen = async () => {
   try {
     await send("Network.enable");
@@ -227,16 +252,16 @@ ws.onopen = async () => {
     const deadline = Date.now() + WAIT_SECONDS * 1000;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 1000));
-      // Stop early once a SUCCESSFUL turn carrying a PoW header is on the record.
-      // Requiring 2xx matters: a pre-login attempt can also carry a pow header
-      // and come back 401, and stopping on that would end the capture before the
-      // user has even logged in.
-      const done = captures.some(
-        (c) =>
-          c.status >= 200 &&
-          c.status < 300 &&
-          conf.powHeaders.some((h) => c.headers[h.toLowerCase()])
-      );
+      // Stop early once a SUCCESSFUL turn is on the record, with its body.
+      // Two conditions are accepted: a 2xx response whose request carried a
+      // proof header (qwen, deepseek), or a 2xx on the provider's turn endpoint
+      // (chatgpt, whose frontend no longer puts a sentinel token on the turn —
+      // requiring one there meant the capture never stopped).
+      const done = captures.some((c) => {
+        if (!(c.status >= 200 && c.status < 300)) return false;
+        if (conf.isTurn && conf.isTurn(c.url)) return true;
+        return conf.powHeaders.some((h) => c.headers[h.toLowerCase()]);
+      });
       if (done) break;
     }
 
@@ -268,9 +293,7 @@ ws.onopen = async () => {
       ),
       { mode: 0o600 }
     );
-    writeFileSync(OUT, JSON.stringify({ exported_at: exportedAt, captures }, null, 2), {
-      mode: 0o600,
-    });
+    flushCapture();
 
     // ── Summary: shapes, never values ──
     console.log(`\n=== capture: ${captures.length} request(s) -> ${OUT} ===`);
@@ -302,3 +325,12 @@ ws.onopen = async () => {
     ws.close();
   }
 };
+
+// Flush on the way out so an operator killing the wait still keeps the traffic.
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    flushCapture();
+    if (wroteOnce) console.error(`\ncaptured ${captures.length} request(s) -> ${OUT}`);
+    process.exit(0);
+  });
+}
