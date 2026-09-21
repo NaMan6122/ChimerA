@@ -194,59 +194,87 @@ The session is not globally blocked: `GET /api/auth/session` and
 
 #### What the live handshake actually returned
 
-The researched model does not match this account:
+An **unauthenticated** call (no `Authorization` header) returns a stripped
+response and is classified `chatgpt-noauth`:
 
 - `POST /sentinel/chat-requirements/prepare` → 200
   `{"persona":"chatgpt-noauth","prepare_token":"gAAAAAB…"}`
-- `POST /sentinel/chat-requirements` → 200
-  `{"persona":"chatgpt-noauth","token":"gAAAAAB…"}`
-- `POST /sentinel/chat-requirements/finalize` → **500** on an empty body
+
+The **authenticated** call the app makes is different, and this is the one that
+matters — it is classified `chatgpt-freeaccount` and it *does* carry the
+challenge:
+
+- `POST /sentinel/chat-requirements/prepare` → 200
+  `{"persona":"chatgpt-freeaccount","prepare_token":"gAAAAAB…",
+    "turnstile":{"required":true,"dx":"PBp5bWF4…"}}`
+- `POST /sentinel/chat-requirements/finalize` → 200
+  `{"persona":…,"token":"gAAAAAB…","expire_after":540,"expire_at":…}`
 - `POST /backend-api/f/conversation/prepare` → 200, conduit token in the
   **response body** (`conduit_token`), not a header
 
-There is **no `proofofwork` and no `turnstile` field** in either response, so
-§3.1's FNV-1a solver has nothing to solve on this surface. `persona` is
-`chatgpt-noauth`, and `finalize` — the step that mints the token the turn
-actually consumes — rejects a body that does not carry the environment material
-the app's obfuscated JS collects.
+**Correction (this spec previously got this wrong):** an earlier version of this
+section asserted "there is no `proofofwork` and no `turnstile` field". That was
+wrong, and the error was in the probe, not the server — the probe sent no
+`Authorization` header, so it received the anonymous persona's stripped reply.
+The authenticated response carries `turnstile.required: true` and a `dx` payload
+of **15,741+ chars** (64-char alphabet, 5.78 bits/char — high-entropy, i.e.
+encoded rather than plain text). The `dx` value is truncated by the capture's
+20,000-char body cap, so its full size is unknown.
 
-#### The captured turn closes the question
+#### The captured turn
 
-The app's own successful `POST /backend-api/f/conversation` was captured with
-request headers. It carries three Sentinel tokens, and the one that matters:
+The app's own successful `POST /backend-api/f/conversation` carries:
 
-| header | size | required? |
+| header | size | what it is |
 |---|---|---|
-| `OpenAI-Sentinel-Turnstile-Token` | **3452 chars** | **yes — present on the successful turn** |
-| `OpenAI-Sentinel-Proof-Token` | 645 chars | yes |
-| `OpenAI-Sentinel-Chat-Requirements-Token` | 2596 chars | yes |
-| `X-OAI-IS-Client-Observation` | `v1.s.p.ohu763QL-Y8re79R` | yes (the `so.collect` fingerprint) |
+| `OpenAI-Sentinel-Turnstile-Token` | **3452 chars** | a Cloudflare Turnstile token |
+| `OpenAI-Sentinel-Proof-Token` | 645 chars | Fernet-shaped |
+| `OpenAI-Sentinel-Chat-Requirements-Token` | 2596 chars | Fernet-shaped |
+| `X-OAI-IS-Client-Observation` | `v1.s.p.ohu763QL-Y8re79R` | fingerprint |
 | `OAI-Echo-Logs`, `OAI-Telemetry`, `x-oai-turn-trace-id` | — | behavioural telemetry |
-| `Authorization` | 2108 chars | yes |
+| `Authorization` | 2108 chars | bearer |
 
-**Turnstile is required, and this refutes the premise of §3.1 and §3.** The
-"Turnstile is advisory for a session with a browser-earned cookie jar" claim —
-which this whole transport was built on, from a single secondary source — is
-wrong for this account. The app proves the opposite by sending a 3452-char
-Turnstile token on every turn, and every programmatic attempt that omitted it
-(including from inside the authenticated page, with real cookies and bearer)
-returned `403 Unusual activity has been detected from your device`.
+So the turn requires **three** client-side tokens, one of which is a Turnstile
+token. Every programmatic attempt that omitted them — including from inside the
+authenticated page, with real cookies and bearer — returned
+`403 Unusual activity has been detected from your device`.
 
-That token is produced by the Sentinel **environment/VM** step: the obfuscated
-client JS that `finalize` expects and that returned 500 when called without it.
+#### Why Turnstile is the blocker
+
+**Turnstile is Cloudflare's anti-bot widget, not an OpenAI invention.** Its token
+is not derived from a formula that can be reimplemented in Go or Python: it is
+minted by Cloudflare's JavaScript running in the page and validated against
+Cloudflare's servers. That is the property the widget exists to provide, and it is
+why "just replay the protocol" does not reach it. In practice this is the familiar
+"you need a browser to satisfy Cloudflare" problem — the same class of obstacle as
+the `cf_clearance` cookie these providers already sit behind, one step stronger.
+
+**Not verified:** whether the `dx` payload is Sentinel VM bytecode, Cloudflare
+configuration, or something else. An earlier version of this section claimed the
+transport "requires a JavaScript engine to run the Sentinel VM (and Turnstile
+bytecode)". That was an **inference presented as a measurement**, and it is not
+established. What *is* established is narrower and sufficient: the turn needs a
+Turnstile token, that token cannot be computed offline, and obtaining one means
+executing Cloudflare's challenge in a browser-like environment.
 
 #### Conclusion
 
-**The transport cannot work, and the reason is structural, not a bug to fix.**
-Reproducing it needs a JavaScript engine to run the Sentinel VM (and Turnstile
-bytecode) — the dependency this design set out to avoid. Adding one would mean
-embedding a JS runtime and tracking an actively-obfuscated VM, which is strictly
-worse than the DOM transport it replaces for a provider already served by DOM.
+**The transport cannot work as written.** The blocking requirement is a Turnstile
+token, and producing one means running a browser-like JS environment — which is
+the DOM transport, or something at least as heavy as it. For a provider that DOM
+already serves reliably, a browserless transport that needs a browser is not a
+transport.
 
 **Decision: ChatGPT stays on the DOM transport.** The code is committed for the
 record but `config.webAPIProviders` excludes it, so `TRANSPORT=auto` cannot select
-it. Do not advertise it, and do not re-enable it without a live programmatic turn
-that succeeds — which is the acceptance criterion this provider never met.
+it. Do not advertise it. Re-enabling requires a live programmatic turn that
+succeeds — the acceptance criterion this provider never met.
+
+**If this is revisited,** the open question to answer first is not "can we
+implement the PoW" but "can we obtain a Turnstile token without a browser" —
+e.g. a documented third-party solver service, or a headless-JS runtime driving the
+widget. Both are a product decision about a new dependency, not an implementation
+detail.
 
 ### 4. Auth: multi-vendor `chimera auth`
 
