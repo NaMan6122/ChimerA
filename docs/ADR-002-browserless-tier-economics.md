@@ -61,7 +61,9 @@ browserless transports.
    (`init_failed`), and — opt-in `TRANSPORT_FALLBACK=dom` — at request time on
    WAF/401/403/429/5xx after one retry. The DOM path remains the universal
    fallback and the only path for providers without a webapi transport
-   (ChatGPT, Claude today).
+   (Claude and Kimi today; ChatGPT and DeepSeek gain webapi transports in
+   `specs/012-webapi-chatgpt-deepseek.md`, which retires the "Sentinel/Turnstile
+   VM" reason this ADR gave for leaving them on DOM — both gates are pure-computable).
 2. **Split the paid offering by substrate, not by provider.**
    - **Subscriber API tier (webapi):** no browser, 17.9 MB/tenant; priced per
      authenticated account-month + request bundle.

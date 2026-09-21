@@ -26,6 +26,7 @@ problem → design → files → acceptance. Build in dependency order.
 | 009 | [Playground page](009-playground.md) | DX | S | — |
 | 010 | [Eval harness](010-eval-harness.md) | DX | S–M | 006 (fixtures reuse pack schema) |
 | 011 | [Provider transports](011-provider-transports.md) | Substrate | L | 005-metrics (done), ADR-001 |
+| 012 | [WebAPI ChatGPT + DeepSeek](012-webapi-chatgpt-deepseek.md) | Substrate | L | 011, ADR-002 |
 
-Suggested build order: 004 → 002 → 003 → 001 → 008 → 005 → 006 → 007 → 009 → 010 → 011.
+Suggested build order: 004 → 002 → 003 → 001 → 008 → 005 → 006 → 007 → 009 → 010 → 011 → 012.
 (Tool hardening first because 002/003 consume its parser; MCP any time after 004.)
