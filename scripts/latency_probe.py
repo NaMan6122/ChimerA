@@ -76,6 +76,13 @@ POST_RE = re.compile(
 SEND_RE = re.compile(r"Sending message \(thread=\S+, len=(?P<len>\d+)\)")
 REJECT_RE = re.compile(r"Pre-flight reject: prompt (?P<len>\d+) chars exceeds")
 LEDGER_RE = re.compile(r"ANV_CONTEXT_LEDGER (?P<json>\{[^\n]*\})")
+# qwenweb provider: per-turn usage line (transport reports real tokens).
+WEBAPI_TURN_RE = re.compile(
+    r"turn done chat=(?P<chat>\S+) prompt_chars=(?P<prompt>\d+) in=(?P<in>\d+) "
+    r"out=(?P<out>\d+) cached=(?P<cached>\d+) ttft_ms=(?P<ttft>\d+) "
+    r"total_ms=(?P<total>\d+) gen_ms=(?P<gen>\d+) out_tok_s=(?P<tps>[0-9.]+) "
+    r"reasoning_chars=(?P<reason>\d+)"
+)
 
 _DUR_UNITS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3,
               "s": 1.0, "m": 60.0, "h": 3600.0}
@@ -99,21 +106,37 @@ def read_from(path: str, offset: int):
 
 
 def parse_rounds(text: str) -> list:
-    """One gateway-log slice -> [{code, wall, chars}] per chat completion."""
-    rounds, pending = [], None
+    """One gateway-log slice -> [{code, wall, chars, tokens}] per chat completion."""
+    rounds, pending, tok = [], None, None
     for line in text.splitlines():
+        m = WEBAPI_TURN_RE.search(line)
+        if m:
+            pending = int(m.group("prompt"))
+            tok = {
+                "in_tok": int(m.group("in")),
+                "out_tok": int(m.group("out")),
+                "cached_tok": int(m.group("cached")),
+                "ttft_ms": int(m.group("ttft")),
+                "gen_ms": int(m.group("gen")),
+                "tps": float(m.group("tps")),
+                "reason_chars": int(m.group("reason")),
+            }
+            continue
         m = SEND_RE.search(line) or REJECT_RE.search(line)
         if m:
             pending = int(m.group("len"))
             continue
         m = POST_RE.search(line)
         if m:
-            rounds.append({
+            rnd = {
                 "code": int(m.group("code")),
                 "wall": parse_go_duration(m.group("dur")),
                 "chars": pending,
-            })
-            pending = None
+            }
+            if tok:
+                rnd.update(tok)
+            rounds.append(rnd)
+            pending, tok = None, None
     return rounds
 
 
@@ -442,7 +465,13 @@ def main():
                 pieces = []
                 for x in rts:
                     p = f" p={x['chars']}" if x.get("chars") else ""
-                    pieces.append(f"[{x['code']} {x['wall']:.1f}s{p}]")
+                    t = ""
+                    if x.get("out_tok") is not None:
+                        t = f" in/out={x['in_tok']}/{x['out_tok']}"
+                        if x["cached_tok"]:
+                            t += f" cached={x['cached_tok']}"
+                        t += f" ttft={x['ttft_ms']/1000:.1f}s {x['tps']:.1f}t/s"
+                    pieces.append(f"[{x['code']} {x['wall']:.1f}s{p}{t}]")
                 if r.get("err"):
                     pieces.append(f"(err: {r['err'][:60]})")
                 print(f"              {' '.join(pieces)}")
@@ -453,6 +482,19 @@ def main():
                 codes[x["code"]] = codes.get(x["code"], 0) + 1
             print(f"    rounds : n={len(durs)}  p50={fmt(pct(durs,50))}  "
                   f"p95={fmt(pct(durs,95))}  mean={fmt(statistics.mean(durs))}  codes={codes}")
+            tok_rounds = [x for x in all_rounds if x.get("out_tok") is not None]
+            if tok_rounds:
+                tin = sum(x["in_tok"] for x in tok_rounds)
+                tout = sum(x["out_tok"] for x in tok_rounds)
+                tcached = sum(x["cached_tok"] for x in tok_rounds)
+                ttfts = [x["ttft_ms"] / 1000 for x in tok_rounds]
+                tps = [x["tps"] for x in tok_rounds if x["tps"] > 0]
+                print(f"    tokens : in={tin} out={tout} cached={tcached} "
+                      f"({100*tcached/max(tin,1):.0f}% of input)")
+                print(f"    ttft   : p50={fmt(pct(ttfts,50))}  p95={fmt(pct(ttfts,95))}")
+                if tps:
+                    print(f"    gen    : out_tok/s p50={pct(tps,50):.1f}  "
+                          f"p95={pct(tps,95):.1f}  ({len(tps)} rounds with output)")
 
     # ── attribution ────────────────────────────────────────────────────────
     d_req = delta(after, before, "chimera_chat_requests_total")

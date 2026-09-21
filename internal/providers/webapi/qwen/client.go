@@ -221,6 +221,7 @@ func (c *Client) NewChat(model string) (string, error) {
 // StreamResult is the assembled outcome of one turn.
 type StreamResult struct {
 	TTFT       time.Duration
+	Duration   time.Duration
 	ResponseID string
 	Content    string
 	Reasoning  string
@@ -365,6 +366,7 @@ func (c *Client) Send(model, chatID, parentID, prompt string, thinking bool) (*S
 	}
 	res.Content = content.String()
 	res.Reasoning = reasoning.String()
+	res.Duration = time.Since(start)
 	return res, nil
 }
 
