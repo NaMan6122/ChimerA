@@ -85,6 +85,12 @@ type model struct {
 	md       *glamour.TermRenderer
 	mdWidth  int
 	mdFailed bool
+
+	// Slash-command hint and backend picker.
+	palMode    paletteMode
+	palItems   []palItem
+	palIndex   int
+	palLoading bool
 }
 
 // backendsMsg carries a completed discovery scan. target is set when a /use
@@ -170,12 +176,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.viewport.Width = msg.Width
-		m.viewport.Height = max(3, msg.Height-8)
 		m.input.SetWidth(msg.Width - 4)
+		m.layout()
 		m.refreshViewport()
 		return m, nil
 
 	case tea.KeyMsg:
+		// The popup owns the arrow keys, enter, tab and esc while it is open.
+		if m.palMode != palNone {
+			switch msg.String() {
+			case "up", "ctrl+p":
+				m.movePal(-1)
+				return m, nil
+			case "down", "ctrl+n":
+				m.movePal(1)
+				return m, nil
+			case "esc":
+				m.closePalette()
+				return m, nil
+			case "tab":
+				m.completePal()
+				return m, nil
+			case "enter":
+				return m.applyPal()
+			}
+		}
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			return m, tea.Quit
@@ -210,6 +235,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case backendsMsg:
+		if msg.target == "__picker__" {
+			m.palLoading = false
+			m.palItems = nil
+			for _, b := range msg.list {
+				if b.Up {
+					m.palItems = append(m.palItems, palItem{label: b.Provider, desc: b.BaseURL + " · " + b.Model, be: b})
+				}
+			}
+			if len(m.palItems) == 0 {
+				m.palItems = []palItem{{label: "(none)", desc: "start one: TRANSPORT=webapi PROVIDER=deepseek chimera"}}
+			}
+			m.palIndex = 0
+			m.layout()
+			return m, nil
+		}
 		if msg.target == "" {
 			m.append(kindNotice, renderBackends(msg.list, m.client.BaseURL))
 			m.refreshViewport()
@@ -253,6 +293,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.syncPalette()
 	return m, cmd
 }
 
@@ -274,7 +315,11 @@ func (m *model) View() string {
 			Render(fmt.Sprintf("  ↑ %d lines below · end to follow", m.hiddenLines()))
 	}
 
-	return "\n" + head + "\n" + rule + "\n" + m.viewport.View() + "\n" + rule + "\n" + m.input.View() + "\n" + status
+	pal := ""
+	if pv := m.paletteView(); pv != "" {
+		pal = pv + "\n"
+	}
+	return "\n" + head + "\n" + rule + "\n" + m.viewport.View() + "\n" + pal + rule + "\n" + m.input.View() + "\n" + status
 }
 
 func (m *model) submit() (tea.Model, tea.Cmd) {
@@ -286,6 +331,7 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.input.Reset()
+	m.closePalette()
 
 	switch task {
 	case "/quit", "/exit":
@@ -324,9 +370,11 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 		return m, m.scan(target)
 	}
 	if task == "/use" {
-		m.append(kindNotice, "usage: /use <provider|port|url>   e.g. /use deepseek")
-		m.refreshViewport()
-		return m, nil
+		// Bare /use opens the picker rather than printing usage: the discoverable
+		// path is the one people take.
+		m.input.SetValue("/use ")
+		m.input.CursorEnd()
+		return m, m.openBackendPicker()
 	}
 	if strings.HasPrefix(task, "/") {
 		m.append(kindError, "unknown command "+task+" — try /help")

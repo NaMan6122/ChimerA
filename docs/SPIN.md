@@ -130,6 +130,11 @@ starts it again.
 | `/help` | the list above |
 | `/quit` | exit (same as `esc`) |
 
+Typing `/` opens a **command hinter** above the input — the list filters as you
+type, `↑↓` moves, `tab` completes, `enter` runs, `esc` closes. Typing `/use `
+(or picking `/use`) opens a **picker** of the gateways that actually answered;
+`enter` on a row switches backend and model without restarting.
+
 `/use` starts a fresh session on the new gateway, because the previous
 conversation lives in the old process. Discovery is a real probe, so a dead port
 is reported as dead rather than assumed absent:

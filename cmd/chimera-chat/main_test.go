@@ -21,8 +21,12 @@ func newTestModel() *model {
 	}
 	m.input = textarea.New()
 	m.input.SetWidth(60)
+	m.input.ShowLineNumbers = false
+	m.input.Prompt = "› "
+	m.input.SetHeight(1)
 	m.spin = spinner.New()
 	m.viewport = viewport.New(80, 20)
+	m.autoScroll = true
 	return m
 }
 
