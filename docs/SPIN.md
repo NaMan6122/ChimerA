@@ -106,6 +106,13 @@ It redefines navigator.webdriver to return undefined …
 enter send · /new new session · esc quit
 ```
 
+Assistant replies are rendered as **Markdown**: headings, lists, tables,
+blockquotes and fenced code with syntax colouring. The theme follows Anvaya's
+renderer — orange headings, blue subheads, a recessed code panel, a dim quoted
+gutter — and the render is cached per width, so a resize re-wraps instead of the
+transcript re-rendering on every event. Tool traces and your own messages stay
+plain.
+
 The transcript you see is **local only**. Nothing in it is sent back as a
 prefix: the first message of a session carries the system prompt and tool
 schemas, and every later message carries only what you typed (`Client.Turns`

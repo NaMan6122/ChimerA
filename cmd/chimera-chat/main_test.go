@@ -36,7 +36,7 @@ func TestRendersToolTraceAndAnswer(t *testing.T) {
 	m.handle(spin.Event{Kind: spin.EventResult, Result: "1: package browser\n2: ..."})
 	m.handle(spin.Event{Kind: spin.EventFinal, Text: "It removes the webdriver flag."})
 
-	view := m.View()
+	view := stripANSI(m.View())
 	for _, want := range []string{"read_file internal/browser/stealth.go", "It removes the webdriver flag.", "round 1"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view missing %q:\n%s", want, view)

@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/chimera/chimera/internal/spin"
@@ -40,6 +41,11 @@ const (
 type entry struct {
 	kind entryKind
 	text string
+	// Assistant messages are rendered once per viewport width and cached: glamour
+	// wraps text, so a resize invalidates the cache but a new event must not
+	// re-render the whole transcript.
+	rendered      string
+	renderedWidth int
 }
 
 type eventMsg spin.Event
@@ -74,6 +80,11 @@ type model struct {
 	// autoScroll follows new output. It turns off the moment the user scrolls
 	// back, so a busy run cannot yank the transcript away from what is being read.
 	autoScroll bool
+
+	// Markdown renderer, rebuilt when the viewport width changes.
+	md       *glamour.TermRenderer
+	mdWidth  int
+	mdFailed bool
 }
 
 // backendsMsg carries a completed discovery scan. target is set when a /use
@@ -436,13 +447,24 @@ func (m *model) hiddenLines() int {
 }
 
 func (m *model) refreshViewport() {
+	m.ensureRenderer()
+
 	var b strings.Builder
-	for _, e := range m.entries {
+	for i := range m.entries {
+		e := &m.entries[i]
+
+		if e.kind == kindAssistant {
+			if e.renderedWidth != m.viewport.Width || e.rendered == "" {
+				e.rendered = renderMarkdown(m.md, e.text)
+				e.renderedWidth = m.viewport.Width
+			}
+			b.WriteString(e.rendered + "\n\n")
+			continue
+		}
+
 		switch e.kind {
 		case kindUser:
 			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render("› "+e.text) + "\n\n")
-		case kindAssistant:
-			b.WriteString(e.text + "\n\n")
 		case kindTool:
 			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render("  "+e.text) + "\n")
 		case kindResult:
@@ -459,6 +481,20 @@ func (m *model) refreshViewport() {
 	if m.autoScroll {
 		m.viewport.GotoBottom()
 	}
+}
+
+// ensureRenderer rebuilds the Markdown renderer when the wrap width changes.
+func (m *model) ensureRenderer() {
+	width := m.viewport.Width
+	if m.md != nil && m.mdWidth == width {
+		return
+	}
+	r, err := newMarkdown(width)
+	if err != nil {
+		m.md, m.mdFailed = nil, true // plain text still renders
+		return
+	}
+	m.md, m.mdWidth, m.mdFailed = r, width, false
 }
 
 // summarize renders a tool result compactly: the model sees the whole thing, the

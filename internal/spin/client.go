@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -105,7 +106,21 @@ func (c *Client) Complete(msgs []Message, withTools bool) (Message, time.Duratio
 		return Message{}, elapsed, fmt.Errorf("gateway returned no choices")
 	}
 	c.Turns++
-	return out.Choices[0].Message, elapsed, nil
+	msg := out.Choices[0].Message
+	msg.Content = stripEscapeTags(msg.Content)
+	return msg, elapsed, nil
+}
+
+// escapeTagRe matches the markers chatgpt.com wraps fenced blocks in. They are a
+// transport artifact, not content: left in place they break Markdown rendering
+// and leak "<escape>" into answers.
+var escapeTagRe = regexp.MustCompile(`</?escape>`)
+
+func stripEscapeTags(s string) string {
+	if !strings.Contains(s, "<escape>") && !strings.Contains(s, "</escape>") {
+		return s
+	}
+	return escapeTagRe.ReplaceAllString(s, "")
 }
 
 // NewSession switches to a fresh upstream conversation. The next turn carries
