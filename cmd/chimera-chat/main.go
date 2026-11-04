@@ -113,10 +113,28 @@ func main() {
 	flag.StringVar(&root, "root", ".", "workspace root the tools are confined to")
 	flag.IntVar(&maxRounds, "max-rounds", 8, "hard stop on tool rounds per message")
 	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
+	var listBackends bool
+	flag.BoolVar(&listBackends, "list-backends", false, "probe local gateways, print what answers, and exit")
 	flag.Parse()
 
 	if showVersion {
 		fmt.Println("chimera-chat " + version)
+		return
+	}
+	if listBackends {
+		list := scan(defaultProbeClient(), probeTargets(baseURL, portRange(8000, 8011)), token)
+		var live []backend
+		for _, b := range list {
+			if b.Up {
+				live = append(live, b)
+			}
+		}
+		if len(live) == 0 {
+			fmt.Println("no gateway answered on localhost:8000-8011")
+			fmt.Println("start one:  TRANSPORT=webapi PROVIDER=deepseek API_PORT=8010 chimera")
+			return
+		}
+		fmt.Println(renderBackends(live, baseURL))
 		return
 	}
 	if session == "" {

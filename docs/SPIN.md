@@ -130,6 +130,14 @@ starts it again.
 | `/help` | the list above |
 | `/quit` | exit (same as `esc`) |
 
+To check binding without opening the TUI:
+
+```bash
+chimera-chat -list-backends
+→ chatgpt    http://localhost:8000/v1    chimera-chatgpt
+  deepseek   http://localhost:8010/v1    chimera-deepseek
+```
+
 Typing `/` opens a **command hinter** above the input — the list filters as you
 type, `↑↓` moves, `tab` completes, `enter` runs, `esc` closes. Typing `/use `
 (or picking `/use`) opens a **picker** of the gateways that actually answered;
