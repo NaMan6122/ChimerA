@@ -218,5 +218,5 @@ func (m *model) layout() {
 	if m.height <= 0 {
 		return
 	}
-	m.viewport.Height = max(3, m.height-8-m.paletteHeight())
+	m.viewport.Height = max(3, m.height-9-m.paletteHeight())
 }

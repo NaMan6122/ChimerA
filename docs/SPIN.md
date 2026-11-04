@@ -127,8 +127,12 @@ starts it again.
 | `/use <provider>` | switch backend, e.g. `/use deepseek` — also `/use 8010` or `/use http://host:8011/v1` |
 | `/new` | new conversation on the current backend |
 | `/status` | backend, model, session, turn count, workspace |
+| `/transcript` | path of this session's transcript on disk |
 | `/help` | the list above |
 | `/quit` | exit (same as `esc`) |
+
+The footer carries a small wordmark — `Powered by Anvaya` — with a highlight
+that travels across it, so the UI shows it is alive even while idle.
 
 To check binding without opening the TUI:
 
@@ -170,6 +174,37 @@ Following resumes automatically when you scroll to the bottom.
 
 `chimera-chat` links a TUI toolkit (bubbletea); `chimera-spin` stays
 stdlib-only, and both share `internal/spin` for the protocol and tools.
+
+## Session transcripts
+
+Every session is recorded to disk, one JSON object per line:
+
+```
+$CHIMERA_SESSIONS_DIR/<session>.jsonl        # default ~/.local/share/chimera/sessions
+```
+
+```
+{"kind":"session","model":"chimera-deepseek","root":"/repo",...}
+{"kind":"user","text":"list the files in internal/spin"}
+{"kind":"round","round":1,"prompt_chars":1222,"latency_s":1.6,"text":"..."}
+{"kind":"tool","round":1,"name":"list_dir","arguments":"{\"path\":\"internal/spin\"}"}
+{"kind":"result","round":1,"name":"list_dir","result":"client.go ..."}
+{"kind":"final","round":2,"text":"internal/spin contains: ..."}
+```
+
+The recorder is a **pure observer**: it subscribes to the loop's events, never
+returns data to it, and never feeds a transcript back into a request. The
+agentic loop is unchanged — turn 1 still sends the task, later turns send only
+tool results.
+
+That separation is the point: the transcript gives you full context for
+handoffs, auditing and recovery without paying for it in prompt size.
+
+- Reopening a session id restores its transcript **for display only**; the next
+  turn still carries just what you type.
+- `/transcript` prints the file in use.
+- `-no-save` disables recording; `-sessions-dir` moves it.
+- Session ids are sanitised, so an id cannot escape the directory.
 
 ## One harness, any backend
 

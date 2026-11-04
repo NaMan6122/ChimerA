@@ -49,10 +49,14 @@ type entry struct {
 }
 
 type eventMsg spin.Event
+
 type doneMsg struct {
 	res spin.Result
 	err error
 }
+
+// brandTick advances the footer's travelling highlight.
+type brandTick struct{}
 
 type model struct {
 	client   *spin.Client
@@ -95,6 +99,9 @@ type model struct {
 	// Session transcript. Observational only: nothing is ever sent back from it.
 	sessionsDir string
 	rec         *spin.Recorder
+
+	// Footer animation phase.
+	phase int
 }
 
 // backendsMsg carries a completed discovery scan. target is set when a /use
@@ -212,7 +219,15 @@ func main() {
 	}
 }
 
-func (m *model) Init() tea.Cmd { return textarea.Blink }
+func (m *model) Init() tea.Cmd {
+	return tea.Batch(textarea.Blink, brandAnimation())
+}
+
+// brandAnimation ticks the footer glow. 12 fps is enough to read as motion and
+// cheap enough to leave running for a whole session.
+func brandAnimation() tea.Cmd {
+	return tea.Tick(85*time.Millisecond, func(time.Time) tea.Msg { return brandTick{} })
+}
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -328,6 +343,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 
+	case brandTick:
+		m.phase++
+		return m, brandAnimation()
+
 	case spinner.TickMsg:
 		if m.busy {
 			var cmd tea.Cmd
@@ -365,7 +384,46 @@ func (m *model) View() string {
 	if pv := m.paletteView(); pv != "" {
 		pal = pv + "\n"
 	}
-	return "\n" + head + "\n" + rule + "\n" + m.viewport.View() + "\n" + pal + rule + "\n" + m.input.View() + "\n" + status
+	footer := m.brandView()
+	if footer != "" {
+		footer = "\n" + footer
+	}
+	return "\n" + head + "\n" + rule + "\n" + m.viewport.View() + "\n" + pal + rule + "\n" + m.input.View() + "\n" + status + footer
+}
+
+// brandView is the wordmark with a bright band travelling across dim text: a
+// running highlight rather than a static colour.
+func (m *model) brandView() string {
+	const brand = "Powered by Anvaya"
+	if m.width < len(brand)+4 {
+		return ""
+	}
+	// The band sweeps in from the left, crosses, and exits to the right.
+	pos := m.phase%(len(brand)+16) - 8
+
+	var b strings.Builder
+	for i, r := range brand {
+		d := pos - i
+		if d < 0 {
+			d = -d
+		}
+		var colour lipgloss.Color
+		switch {
+		case d == 0:
+			colour = "214" // amber core
+		case d <= 2:
+			colour = "208"
+		case d <= 4:
+			colour = "203"
+		case d <= 7:
+			colour = "240"
+		default:
+			colour = "238"
+		}
+		b.WriteString(lipgloss.NewStyle().Foreground(colour).Render(string(r)))
+	}
+	pad := strings.Repeat(" ", max(0, m.width-len(brand)-2))
+	return pad + b.String() + "  "
 }
 
 func (m *model) submit() (tea.Model, tea.Cmd) {
