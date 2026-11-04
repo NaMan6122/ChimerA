@@ -8,9 +8,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -39,6 +41,16 @@ func main() {
 		runAuth(os.Args[2:])
 		return
 	}
+	// The gateway takes no subcommand. Saying so beats starting a server under a
+	// name that looks like one ("chimera spin" is the most likely typo: the
+	// harness is a separate binary).
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
+		fmt.Fprintln(os.Stderr, "  gateway:  chimera                       (no arguments; serves :8000)")
+		fmt.Fprintln(os.Stderr, "  sessions: chimera auth login|status|check")
+		fmt.Fprintln(os.Stderr, "  harness:  chimera-spin \"<task>\"          (separate binary, needs a running gateway)")
+		os.Exit(2)
+	}
 
 	// Banner
 	fmt.Println(`
@@ -60,6 +72,16 @@ func main() {
 
 	log_.Infof("Chimera starting (provider=%s, port=%d)", cfg.Provider, cfg.APIPort)
 	log_.Infof("Provider URL: %s", cfg.ProviderURL())
+
+	// Bind before any provider work. Otherwise a second instance validates a
+	// session (a network round trip) and only then discovers the port is taken,
+	// which reads as though the session caused the failure.
+	addr := fmt.Sprintf("%s:%d", cfg.APIHost, cfg.APIPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("cannot listen on %s: %v\n  Another Chimera is probably running: pgrep -fl 'chimera$'", addr, err)
+	}
+	defer ln.Close()
 
 	// ── Browser launch: single vs pooled (single Chromium with page-per-provider) ──
 	var (
@@ -165,7 +187,6 @@ func main() {
 		}
 	}
 
-	addr := fmt.Sprintf("%s:%d", cfg.APIHost, cfg.APIPort)
 	httpServer := &http.Server{
 		Addr:         addr,
 		Handler:      server.Router(),
@@ -199,7 +220,7 @@ func main() {
 	log_.Infof("OpenAI-compatible endpoint: http://localhost:%d/v1", cfg.APIPort)
 	log_.Info("Press Ctrl+C to stop")
 
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
 
