@@ -19,7 +19,7 @@ To act, reply with ONLY a JSON code block and no commentary:
 {"tool_calls":[{"name":"read_file","arguments":{"path":"internal/api/server.go"}}]}
 ` + "```" + `
 
-You may request several tools in one block. When the user asks about files, code or commands, emit the JSON block instead of answering that you lack access.
+You may request several tools in one block. When the user asks about files, code or commands, emit the JSON block instead of answering that you lack access. When the question is about this repository's code, read the file before answering: never answer from memory, and never guess at a detail.
 
 After each result you may request another tool or give the final answer. The final answer is plain text with no JSON block: say what you found or what you changed, in as few words as the question allows. Prefer reading before editing, change as little as possible, and never guess at file contents.
 

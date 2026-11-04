@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -150,6 +151,7 @@ func (s *spin) run() error {
 
 	var lastSig string
 	repeats := 0
+	nudged := false
 	for round := 1; round <= s.cfg.maxRounds; round++ {
 		// Tool schemas are sent on the first turn only. The upstream conversation
 		// keeps them from then on; re-sending them is exactly the accumulation this
@@ -169,6 +171,19 @@ func (s *spin) run() error {
 		}
 
 		if len(calls) == 0 {
+			// A repo question answered without reading anything is a guess. Nudge
+			// once before accepting it; measured: the model happily answers
+			// "what does applyStealth do" from memory and gets the detail wrong.
+			if round == 1 && !nudged && looksLikeRepoQuestion(s.cfg.task) {
+				nudged = true
+				s.rounds = append(s.rounds, stat)
+				fmt.Fprintln(os.Stderr, "[spin] no tool calls on a repo question — asking for evidence")
+				pending = []message{{
+					Role:    "user",
+					Content: "You answered without reading anything. Read the relevant file(s) with read_file (or locate them with grep) before answering, then give the final answer.",
+				}}
+				continue
+			}
 			s.rounds = append(s.rounds, stat)
 			fmt.Println(strings.TrimSpace(reply.Content))
 			s.report(started, true)
@@ -212,6 +227,14 @@ func (s *spin) run() error {
 	}
 	return fmt.Errorf("hit the %d-round budget without a final answer", s.cfg.maxRounds)
 }
+
+// repoQuestionRe matches tasks that can only be answered from the workspace:
+// a source path, a file extension, or an explicit instruction to read.
+var repoQuestionRe = regexp.MustCompile(`(?i)(\.go\b|\.md\b|internal/|cmd/|docs/|scripts/|read the|look at|in this repo|the file|the code|\b[a-z]+[A-Z][A-Za-z]*\b|function|struct|method|handler|provider)`)
+
+// looksLikeRepoQuestion reports whether a task should be answered from files
+// rather than from the model's memory.
+func looksLikeRepoQuestion(task string) bool { return repoQuestionRe.MatchString(task) }
 
 // signature identifies a round's calls, so a repeated round is detectable.
 func signature(calls []toolCall) string {

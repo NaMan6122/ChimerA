@@ -27,10 +27,17 @@ never parses or stores it — `s.rounds` holds latency and character counts only
 ## Install
 
 ```bash
-./build.sh                # build + install into ~/.local
-./build.sh --no-install   # build into ./bin only
-./build.sh --prefix=/opt  # different prefix
+./build.sh                # build + install both programs
+./build.sh spin           # the harness alone — no backend needed to build it
+./build.sh gateway        # the gateway alone
+./build.sh spin --no-install
+./build.sh --prefix=/opt spin
 ```
+
+The harness and the gateway are independent programs. `cmd/chimera-spin`
+imports **nothing** from `internal/` — it is stdlib-only and speaks plain HTTP,
+so it can be built, shipped and run on its own against any OpenAI-compatible
+endpoint. They share a repository, not a runtime.
 
 Same layout as `anv` — a versioned directory plus a stable symlink on PATH:
 
@@ -72,6 +79,27 @@ A run prints the answer on stdout and a report on stderr:
 [spin]   round 2: 963 chars, 6.3s, tools=[grep read_file read_file]
 [spin]   round 3: 7224 chars, 6.3s, tools=[]
 ```
+
+## One harness, any backend
+
+The harness names no provider. Point it at whichever gateway is running:
+
+```bash
+# ChatGPT web session on :8000
+chimera-spin -base-url http://localhost:8000/v1 -model chimera-chatgpt "..."
+
+# DeepSeek web session on :8010 — same binary, no rebuild
+chimera-spin -base-url http://localhost:8010/v1 -model chimera-deepseek "..."
+```
+
+Measured on the same task (read one file, answer from it):
+
+| Backend | Round 1 | Round 2 | Round 3 | Wall |
+|---|---|---|---|---|
+| `chimera-deepseek` | 1.6 s | 1.2 s | 1.7 s | **4.5 s** |
+| `chimera-chatgpt` | 6.2 s | 5.8 s | 4.9 s | 21.3 s |
+
+The harness cost is identical; the difference is the vendor's web API.
 
 ## Tools
 

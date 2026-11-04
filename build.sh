@@ -1,58 +1,71 @@
 #!/usr/bin/env bash
 #
-# build.sh — build Chimera (gateway) and chimera-spin (harness), then install
-# them the way anv is installed: a versioned directory plus a stable symlink on
-# PATH.
+# build.sh — build and install Chimera's two independent programs.
 #
-#   ./build.sh                 build + install into ~/.local
-#   ./build.sh --no-install    build into ./bin only
-#   ./build.sh --prefix=/opt   install into a different prefix
+#   ./build.sh                build + install both
+#   ./build.sh spin           the harness only (a plain HTTP client, no backend)
+#   ./build.sh gateway        the gateway only
+#   ./build.sh spin --no-install
+#   ./build.sh --prefix=/opt spin
 #
-# Layout:
-#   <prefix>/share/chimera/versions/<version>/chimera
-#   <prefix>/share/chimera/versions/<version>/chimera-spin
-#   <prefix>/bin/chimera        -> the versioned binary
-#   <prefix>/bin/chimera-spin   -> the versioned binary
+# The harness has no compile-time or runtime dependency on the gateway: it is
+# stdlib-only and talks to any OpenAI-compatible endpoint. They ship together
+# here only because they live in one repository.
+#
+# Install layout (same shape as anv): a versioned directory plus a stable
+# symlink on PATH.
+#   <prefix>/share/chimera/versions/<version>/<binary>
+#   <prefix>/bin/<binary>
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PREFIX=${PREFIX:-$HOME/.local}
 INSTALL=1
+TARGET=all
 
 for arg in "$@"; do
     case "$arg" in
-        --no-install) INSTALL=0 ;;
-        --prefix=*)   PREFIX="${arg#*=}" ;;
-        -h|--help)    sed -n '3,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *)            echo "unknown argument: $arg" >&2; exit 2 ;;
+        all|gateway|spin) TARGET="$arg" ;;
+        --no-install)     INSTALL=0 ;;
+        --prefix=*)       PREFIX="${arg#*=}" ;;
+        -h|--help)        sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)                echo "unknown argument: $arg (expected: all|gateway|spin)" >&2; exit 2 ;;
     esac
 done
 
 VERSION=$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || date +%Y%m%d-%H%M)
 LDFLAGS="-s -w -X main.version=$VERSION"
+BIN="$PREFIX/bin"
+DEST="$PREFIX/share/chimera/versions/$VERSION"
 
-echo "==> chimera build: version=$VERSION cgo=off"
 mkdir -p "$ROOT/bin"
-CGO_ENABLED=0 go build -C "$ROOT" -ldflags "$LDFLAGS" -o "$ROOT/bin/chimera" ./cmd/chimera
-CGO_ENABLED=0 go build -C "$ROOT" -ldflags "$LDFLAGS" -o "$ROOT/bin/chimera-spin" ./cmd/chimera-spin
+BUILT=()
+
+build() {
+    local name=$1 pkg=$2
+    CGO_ENABLED=0 go build -C "$ROOT" -ldflags "$LDFLAGS" -o "$ROOT/bin/$name" "$pkg"
+    BUILT+=("$name")
+    printf '    built %s (%s)\n' "$name" "$(du -h "$ROOT/bin/$name" | cut -f1)"
+}
+
+echo "==> chimera build: target=$TARGET version=$VERSION cgo=off"
+case "$TARGET" in
+    all)     build chimera ./cmd/chimera; build chimera-spin ./cmd/chimera-spin ;;
+    gateway) build chimera ./cmd/chimera ;;
+    spin)    build chimera-spin ./cmd/chimera-spin ;;
+esac
 
 if [ "$INSTALL" -eq 0 ]; then
-    echo "==> built (not installed):"
-    ls -lh "$ROOT/bin/chimera" "$ROOT/bin/chimera-spin" | awk '{print "    "$9" ("$5")"}'
+    echo "==> not installed (built into $ROOT/bin)"
     exit 0
 fi
 
-DEST="$PREFIX/share/chimera/versions/$VERSION"
-BIN="$PREFIX/bin"
 mkdir -p "$DEST" "$BIN"
-install -m 0755 "$ROOT/bin/chimera" "$DEST/chimera"
-install -m 0755 "$ROOT/bin/chimera-spin" "$DEST/chimera-spin"
-ln -sfn "$DEST/chimera" "$BIN/chimera"
-ln -sfn "$DEST/chimera-spin" "$BIN/chimera-spin"
-
-echo "==> installed"
-printf '    %s -> %s\n' "$BIN/chimera" "$(readlink "$BIN/chimera")"
-printf '    %s -> %s\n' "$BIN/chimera-spin" "$(readlink "$BIN/chimera-spin")"
+for name in "${BUILT[@]}"; do
+    install -m 0755 "$ROOT/bin/$name" "$DEST/$name"
+    ln -sfn "$DEST/$name" "$BIN/$name"
+    printf '    %s -> %s\n' "$BIN/$name" "$(readlink "$BIN/$name")"
+done
 
 case ":$PATH:" in
     *":$BIN:"*) ;;
@@ -60,8 +73,8 @@ case ":$PATH:" in
 esac
 
 echo "==> smoketest"
-"$BIN/chimera-spin" -version
+for name in "${BUILT[@]}"; do "$BIN/$name" -version; done
+
 echo
-echo "next:"
-echo "    TRANSPORT=webapi PROVIDER=chatgpt chimera      # one terminal"
-echo "    chimera-spin \"read internal/api/server.go and summarise buildPrompt\""
+echo "The harness is a client: point it at any running gateway."
+echo "    chimera-spin -base-url http://host:8000/v1 \"<task>\""

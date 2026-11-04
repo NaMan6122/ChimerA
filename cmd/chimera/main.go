@@ -35,10 +35,17 @@ import (
 
 var log_ = logging.New("main", "./logs", "debug", true)
 
+// version is stamped at install time with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	// `chimera auth ...` manages storage-state sessions; it is not the server.
 	if len(os.Args) > 1 && os.Args[1] == "auth" {
 		runAuth(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
+		fmt.Printf("chimera %s\n", version)
 		return
 	}
 	// The gateway takes no subcommand. Saying so beats starting a server under a
