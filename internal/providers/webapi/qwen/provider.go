@@ -154,8 +154,18 @@ func (p *Provider) ExtractResponse() (string, error) {
 	return "", fmt.Errorf("ExtractResponse is not supported by the qwen web transport")
 }
 
-// IsLoggedIn validates the session against /api/models.
+// IsLoggedIn validates the session.
+//
+// The stored JWT's exp claim is checked before any network probe: measured, a
+// token 18 days past exp still listed models successfully while chat creation
+// returned "unauthorized". Reporting OK there is worse than a slow check — it
+// tells the user to retry a session that cannot work.
 func (p *Provider) IsLoggedIn() (bool, error) {
+	if p.sess != nil {
+		if exp, ok := p.sess.ExpiresAt(); ok && time.Now().After(exp) {
+			return false, fmt.Errorf("%w: token expired %s", webapi.ErrSessionExpired, exp.Format(time.RFC3339))
+		}
+	}
 	if p.client == nil {
 		return false, nil
 	}

@@ -359,10 +359,14 @@ Documented because they are measured, not because they are ignored.
 2. **Provider failures after SSE headers are committed return HTTP 200** with an
    `{"error":…}` event inside the stream, so naive clients (and the latency
    probe) count a dead turn as success. Check the stream body, not just the status.
-3. **`chimera auth status` can over-report health.** A Qwen JWT 18 days past its
-   `exp` was reported `provider check: OK` while chat creation returned
-   `unauthorized`; the liveness probe hits an endpoint that tolerates the stale
-   token. The probe is being tightened to the endpoint that actually matters.
+3. **DeepSeek rate-limits per account.** "Messages too frequent" arrives as an
+   in-stream event rather than an HTTP error; it is now surfaced as one instead
+   of a successful empty turn, but the limit itself is the vendor's to set.
+
+Fixed since this section was written: `chimera auth status` used to report a
+Qwen token 18 days past its `exp` as healthy (the probe endpoint tolerates a
+stale token); the `exp` claim is now checked first, and DeepSeek turn failures
+self-heal by starting a fresh conversation.
 
 Tracking and fixes live in [`specs/`](specs/).
 
