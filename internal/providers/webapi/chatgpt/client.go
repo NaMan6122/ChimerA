@@ -1,3 +1,18 @@
+// Package chatgptweb replays chatgpt.com's backend-api over HTTP — no browser
+// (spec 012 §3). Verified live: a turn returns 200 + text/event-stream in 5–7 s
+// with only the exported cookie jar.
+//
+// The handshake, as measured against a live session:
+//
+//	1. mint a bearer from the cookie jar   GET /api/auth/session
+//	2. generate the requirements token     locally, SHA3-PoW at difficulty 0fffff
+//	3. POST /sentinel/chat-requirements    body {"p": <requirements token>}
+//	4. solve the returned proofofwork      SHA3-512 over the fingerprint config
+//	5. POST /backend-api/f/conversation   with the two tokens above
+//
+// Turnstile is advisory for a session holding a browser-earned cookie jar: the
+// turn succeeds without it. It is still solved when present, because a future
+// OpenAI change could make it mandatory.
 package chatgptweb
 
 import (
@@ -7,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -17,25 +33,23 @@ import (
 // BaseURL is the chatgpt.com origin; overridable in tests.
 const BaseURL = "https://chatgpt.com"
 
-// Client-identification values. These are protocol, not secrets; the exact set is
-// unconfirmed until a capture (spec 012 §3.1, §Risks).
+// Client-identification values the web app sends. These are protocol, not
+// secrets; the set was verified against a live capture (logs/chatgpt-capture3.json)
+// rather than taken from documentation.
 const (
-	clientVersion = "20250610.1420234636"
-	userAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+	clientVersion = "prod-98dd09f10c6ec38bdee2965a6d1988b345c9758b"
+	buildNumber   = "11120908"
 )
 
-// Client is a low-level chatgpt.com backend-api client. Auth is cookie-custody:
+// Client is a low-level chatgpt.com backend-api client. Auth is cookie custody:
 // the durable credential is the session cookie, and the bearer is minted from it
-// on demand (spec 012 §3).
+// on demand.
 type Client struct {
 	BaseURL string
 	http    *http.Client
 	token   string // bearer, refreshed from the cookie jar
 	cookies map[string]string
 	device  string
-	// powConfig is the fingerprint mixed into the Sentinel proof. It is fixed for
-	// the lifetime of the client so a solved proof stays re-derivable.
-	powConfig string
 
 	// OnPowSolve, when set, receives how long each proof-of-work solve took. The
 	// provider wires it to telemetry so this package stays dependency-free.
@@ -45,12 +59,11 @@ type Client struct {
 // NewClient builds a client from storage-state material.
 func NewClient(s *webapi.Session, timeout time.Duration) *Client {
 	return &Client{
-		BaseURL:   BaseURL,
-		http:      &http.Client{Timeout: timeout},
-		token:     s.AccessToken,
-		cookies:   s.Cookies,
-		device:    uuid4(),
-		powConfig: DefaultPoWConfig(),
+		BaseURL: BaseURL,
+		http:    &http.Client{Timeout: timeout},
+		token:   s.AccessToken,
+		cookies: s.Cookies,
+		device:  uuid4(),
 	}
 }
 
@@ -70,20 +83,20 @@ func (c *Client) cookieHeader() string {
 	return strings.Join(parts, "; ")
 }
 
+// headers builds the base header set the web app sends, minus per-request
+// sentinel/conduit tokens.
 func (c *Client) headers() http.Header {
 	h := http.Header{}
 	h.Set("User-Agent", userAgent)
-	h.Set("Accept", "*/*")
 	h.Set("Accept-Language", "en-US,en;q=0.9")
 	h.Set("Origin", c.BaseURL)
 	h.Set("Referer", c.BaseURL+"/")
-	h.Set("Content-Type", "application/json")
 	h.Set("oai-device-id", c.device)
 	h.Set("oai-client-version", clientVersion)
+	h.Set("oai-client-build-number", buildNumber)
 	h.Set("oai-language", "en-US")
-	if ck := c.cookieHeader(); ck != "" {
-		h.Set("Cookie", ck)
-	}
+	h.Set("x-openai-web-frontend", "core_web")
+	h.Set("Cookie", c.cookieHeader())
 	if c.token != "" && c.token != "cookie-session" {
 		h.Set("Authorization", "Bearer "+c.token)
 	}
@@ -120,7 +133,7 @@ func decodeJSON(resp *http.Response, out any) error {
 }
 
 // RefreshToken mints a fresh bearer from the session cookie jar. This is the
-// browserless equivalent of a page reload: no Chromium required (spec 012 §3).
+// browserless equivalent of a page reload: no Chromium required.
 func (c *Client) RefreshToken() (string, error) {
 	req, _ := http.NewRequest("GET", c.BaseURL+"/api/auth/session", nil)
 	resp, err := c.do(req)
@@ -129,9 +142,19 @@ func (c *Client) RefreshToken() (string, error) {
 	}
 	var doc struct {
 		AccessToken string `json:"accessToken"`
+		// Error is set when the cookie jar is present but the session cannot be
+		// refreshed — e.g. "RefreshAccessTokenError". This is the ONLY reliable
+		// liveness signal on this endpoint: a dead session still returns HTTP 200
+		// with an `accessToken` field, but that token is already expired, so the
+		// next turn 401s. (WARNING_BANNER is NOT a signal — it accompanies healthy
+		// sessions too.)
+		Error string `json:"error"`
 	}
 	if err := decodeJSON(resp, &doc); err != nil {
 		return "", err
+	}
+	if doc.Error != "" {
+		return "", fmt.Errorf("%w: session endpoint reported %q (re-export the session)", webapi.ErrSessionExpired, doc.Error)
 	}
 	if doc.AccessToken == "" {
 		return "", fmt.Errorf("%w: no accessToken (session cookie rejected)", webapi.ErrSessionExpired)
@@ -149,13 +172,15 @@ func (c *Client) IsLoggedIn() (bool, error) {
 	return true, nil
 }
 
-// sentinelResponse is the shape of both /chat-requirements endpoints.
+// sentinelResponse is the shape of /sentinel/chat-requirements.
 type sentinelResponse struct {
 	Token       string `json:"token"`
+	Persona     string `json:"persona"`
+	PrepareTok  string `json:"prepare_token"`
 	ProofOfWork *struct {
 		Required   bool   `json:"required"`
 		Seed       string `json:"seed"`
-		Difficulty int    `json:"difficulty"`
+		Difficulty string `json:"difficulty"`
 	} `json:"proofofwork"`
 	Turnstile *struct {
 		Required bool   `json:"required"`
@@ -163,45 +188,64 @@ type sentinelResponse struct {
 	} `json:"turnstile"`
 }
 
-// Sentinel runs the two-step chat-requirements handshake and returns the
-// per-turn tokens. Turnstile is advisory for a session with a browser-earned
-// cookie jar (spec 012 §3.1), so it is deliberately not solved here.
-func (c *Client) Sentinel() (requirements, proof string, err error) {
-	body := []byte(`{"p":""}`)
-	req, _ := http.NewRequest("POST", c.BaseURL+"/backend-api/sentinel/chat-requirements/prepare", bytes.NewReader(body))
+// Sentinel runs the chat-requirements handshake and returns the per-turn tokens.
+//
+// The requirements token is generated locally and sent as `p`; the returned
+// proof-of-work is solved against the challenge the server issues. Turnstile is
+// solved when present but is advisory for a cookie-jar session, so a failure to
+// solve it is not fatal.
+func (c *Client) Sentinel() (requirements, proof, turnstile string, err error) {
+	p, err := GetRequirementsToken()
+	if err != nil {
+		return "", "", "", fmt.Errorf("requirements token: %w", err)
+	}
+
+	req, _ := http.NewRequest("POST", c.BaseURL+"/backend-api/sentinel/chat-requirements",
+		strings.NewReader(`{"p":`+jsonString(p)+`}`))
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.do(req)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	var prep sentinelResponse
-	if err := decodeJSON(resp, &prep); err != nil {
-		return "", "", err
-	}
-
-	req2, _ := http.NewRequest("POST", c.BaseURL+"/backend-api/sentinel/chat-requirements", bytes.NewReader(body))
-	req2.Header.Set("openai-sentinel-chat-requirements-token", prep.Token)
-	resp2, err := c.do(req2)
-	if err != nil {
-		return "", "", err
-	}
-	var final sentinelResponse
-	if err := decodeJSON(resp2, &final); err != nil {
-		return "", "", err
+	var doc sentinelResponse
+	if err := decodeJSON(resp, &doc); err != nil {
+		return "", "", "", err
 	}
 
-	requirements = firstNonEmpty(final.Token, prep.Token)
-	if final.ProofOfWork != nil && final.ProofOfWork.Required {
+	requirements = doc.Token
+	if requirements == "" {
+		return "", "", "", fmt.Errorf("%w: no chat-requirements token (persona=%q)", webapi.ErrSessionExpired, doc.Persona)
+	}
+
+	if doc.ProofOfWork != nil && doc.ProofOfWork.Required {
 		solveStart := time.Now()
-		tok, ok := SolveProof(final.ProofOfWork.Seed, final.ProofOfWork.Difficulty, c.powConfig)
+		tok, ok, err := SolveProof(doc.ProofOfWork.Seed, doc.ProofOfWork.Difficulty)
 		if c.OnPowSolve != nil {
 			c.OnPowSolve(time.Since(solveStart))
 		}
+		if err != nil {
+			return "", "", "", err
+		}
 		if !ok {
-			return "", "", fmt.Errorf("%w: sentinel difficulty %d unsolved", webapi.ErrPowFailed, final.ProofOfWork.Difficulty)
+			return "", "", "", fmt.Errorf("%w: sentinel difficulty %s unsolved", webapi.ErrPowFailed, doc.ProofOfWork.Difficulty)
 		}
 		proof = tok
 	}
-	return requirements, proof, nil
+
+	if doc.Turnstile != nil && doc.Turnstile.Required && doc.Turnstile.Dx != "" {
+		// The XOR key is the proof token when present, else p.
+		tok, _, terr := solveTurnstileAny(doc.Turnstile.Dx, proof, p)
+		if terr == nil {
+			turnstile = tok
+		}
+	}
+	return requirements, proof, turnstile, nil
+}
+
+// jsonString renders s as a JSON string literal, for embedding in a body.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // StreamResult is the assembled outcome of one turn.
@@ -214,55 +258,61 @@ type StreamResult struct {
 	Reasoning    string
 }
 
-// delta is one entry of the `delta_encoding: v1` patch stream. The first delta
-// for a path carries "p" and "o"; the rest carry only "v" (spec 012 §3).
-type delta struct {
-	P string `json:"p"`
-	O string `json:"o"`
-	V any    `json:"v"`
-}
-
 // Send streams one turn and returns the assembled answer. conversationID
-// continues an existing conversation (empty creates one); parentMessageID is the
-// previous message id.
+// continues an existing conversation; empty creates a new one. A new chat must
+// NOT carry a conversation_id — a random one yields 404 "Conversation not found".
 func (c *Client) Send(model, conversationID, parentMessageID, prompt string) (*StreamResult, error) {
 	if c.token == "" || c.token == "cookie-session" {
 		if _, err := c.RefreshToken(); err != nil {
 			return nil, err
 		}
 	}
-	requirements, proof, err := c.Sentinel()
+	requirements, proof, turnstile, err := c.Sentinel()
 	if err != nil {
 		return nil, err
 	}
 
 	payload := map[string]any{
-		"action":            "next",
-		"model":             model,
-		"parent_message_id": parentMessageID,
+		"action": "next",
+		"model":  model,
 		"messages": []map[string]any{{
 			"id":          uuid4(),
 			"author":      map[string]string{"role": "user"},
+			"create_time": float64(time.Now().Unix()),
 			"content":     map[string]any{"content_type": "text", "parts": []string{prompt}},
-			"metadata":    map[string]any{},
-			"create_time": time.Now().Unix(),
+			"metadata": map[string]any{
+				"serialization_metadata": map[string]any{"custom_symbol_offsets": []any{}},
+				"submission_mode":        "manual_send",
+			},
 		}},
-		"timezone":          "UTC",
-		"conversation_mode": "primary_assistant",
-		"is_authenticated":  true,
-		"locale":            "en-US",
+		"parent_message_id":        parentMessageID,
+		"client_prepare_state":     "sent",
+		"timezone_offset_min":      -330,
+		"timezone":                 "Asia/Calcutta",
+		"conversation_mode":        map[string]any{"kind": "primary_assistant"},
+		"enable_message_followups": true,
 	}
 	if conversationID != "" {
 		payload["conversation_id"] = conversationID
 	}
 	body, _ := json.Marshal(payload)
 
-	req, _ := http.NewRequest("POST", c.BaseURL+"/backend-api/conversation", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", c.BaseURL+"/backend-api/f/conversation", bytes.NewReader(body))
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("openai-sentinel-chat-requirements-token", requirements)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("OpenAI-Sentinel-Chat-Requirements-Token", requirements)
 	if proof != "" {
-		req.Header.Set("openai-sentinel-proof-token", proof)
+		req.Header.Set("OpenAI-Sentinel-Proof-Token", proof)
 	}
+	if turnstile != "" {
+		req.Header.Set("OpenAI-Sentinel-Turnstile-Token", turnstile)
+	}
+	req.Header.Set("X-OpenAI-Target-Path", "/backend-api/f/conversation")
+	req.Header.Set("X-OpenAI-Target-Route", "/backend-api/f/conversation")
+	req.Header.Set("x-oai-turn-trace-id", uuid4())
+	req.Header.Set("oai-session-id", uuid4())
+	req.Header.Set("X-OAI-IS-Client-Observation", "v1.s.p."+randomID(16))
+	req.Header.Set("X-OAI-IS-Pending-Updates", `{"v":3,"updates":[]}`)
 
 	start := time.Now()
 	resp, err := c.do(req)
@@ -288,12 +338,24 @@ func (c *Client) Send(model, conversationID, parentMessageID, prompt string) (*S
 	}
 
 	res := &StreamResult{}
-	var content strings.Builder
-	lastPath := ""
+	var delta strings.Builder // only used by patch-style streams
+	var lastPath string
+	var finalText string // last full assistant snapshot (cumulative, so replace)
+	// CHIMERA_SSE_DUMP=<path> records the raw event stream. The framing differs
+	// per endpoint (f/conversation vs conversation), and when the answer is
+	// duplicated or echoed there is no substitute for reading the real bytes.
+	dumpPath := os.Getenv("CHIMERA_SSE_DUMP")
+	var dump *os.File
+	if dumpPath != "" {
+		dump, _ = os.Create(dumpPath)
+	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 1<<20), 4<<20)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
+		if dump != nil {
+			fmt.Fprintln(dump, line)
+		}
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
@@ -301,64 +363,120 @@ func (c *Client) Send(model, conversationID, parentMessageID, prompt string) (*S
 		if data == "" || data == "[DONE]" {
 			continue
 		}
-		var d delta
-		if err := json.Unmarshal([]byte(data), &d); err != nil {
+
+		// Shape 1: a full message object (the app's own framing). The stream
+		// carries system and user turns too — the user message IS the entire
+		// prompt — so anything that is not the assistant's turn is skipped.
+		var msg struct {
+			Message *struct {
+				ID     string `json:"id"`
+				Author struct {
+					Role string `json:"role"`
+				} `json:"author"`
+				Content struct {
+					ContentType string `json:"content_type"`
+					Parts       []any  `json:"parts"`
+					Text        string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+			ConversationID string `json:"conversation_id"`
+		}
+		if json.Unmarshal([]byte(data), &msg) == nil && msg.Message != nil {
+			if msg.ConversationID != "" {
+				res.Conversation = msg.ConversationID
+			}
+			if msg.Message.Author.Role != "assistant" {
+				continue
+			}
+			if msg.Message.ID != "" {
+				res.MessageID = msg.Message.ID
+			}
+			text := msg.Message.Content.Text
+			if text == "" {
+				var b strings.Builder
+				for _, p := range msg.Message.Content.Parts {
+					if s, ok := p.(string); ok {
+						b.WriteString(s)
+					}
+				}
+				text = b.String()
+			}
+			// The same assistant message is re-sent as it grows (0 → 17 → 64 →
+			// 64 chars in one measured turn). These are cumulative snapshots, so
+			// the newest one replaces the previous rather than extending it;
+			// appending produced "HelloHelloHelloHello".
+			if text != "" {
+				if res.TTFT == 0 {
+					res.TTFT = time.Since(start)
+				}
+				finalText = text
+			}
 			continue
 		}
-		// Message metadata (id, conversation_id) arrives on non-content paths.
-		if d.P == "" && strings.Contains(d.O, "add") {
+
+		// Shape 2: a delta_encoding:v1 patch, used by endpoints that stream
+		// increments instead of snapshots.
+		var d struct {
+			P string `json:"p"`
+			O string `json:"o"`
+			V any    `json:"v"`
+		}
+		if json.Unmarshal([]byte(data), &d) != nil {
 			continue
 		}
 		if d.P != "" {
 			lastPath = d.P
 		}
-		text, isStr := d.V.(string)
+		s, isStr := d.V.(string)
 		if !isStr {
 			continue
 		}
-		// Only append text destined for the assistant message content. Some
-		// deltas carry author/role/status strings on other paths.
-		if isContentPath(lastPath) {
+		switch {
+		case strings.Contains(lastPath, "/message/content/parts/"):
 			if res.TTFT == 0 {
 				res.TTFT = time.Since(start)
 			}
-			content.WriteString(text)
+			if d.O == "replace" {
+				delta.Reset()
+			}
+			delta.WriteString(s)
+		case strings.Contains(lastPath, "reasoning_content"):
+			res.Reasoning += s
 		}
-		// The final patch carrying the conversation id also lands here.
 		if d.P == "/conversation_id" {
-			res.Conversation = text
+			res.Conversation = s
 		}
 		if d.P == "/message/id" {
-			res.MessageID = text
+			res.MessageID = s
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
-	res.Content = content.String()
+	// Snapshots win when present; patches only serve streams that send no
+	// full-message frames at all.
+	if finalText != "" {
+		res.Content = finalText
+	} else {
+		res.Content = delta.String()
+	}
 	res.Duration = time.Since(start)
 	return res, nil
-}
-
-// isContentPath reports whether a delta path addresses the assistant message's
-// text, which is the only path whose values are answer tokens.
-func isContentPath(p string) bool {
-	return strings.Contains(p, "/message/content/parts/")
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 func snippet(b []byte) string {
 	s := strings.Join(strings.Fields(string(b)), " ")
 	if len(s) > 160 {
-		return s[:160]
+		s = s[:160]
 	}
 	return s
+}
+
+func randomID(n int) string {
+	const alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = alpha[mrand(len(alpha))]
+	}
+	return string(b)
 }

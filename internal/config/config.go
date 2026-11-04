@@ -280,16 +280,15 @@ func (c *Config) QwenSessionPath() string { return c.SessionPath(ProviderQwen) }
 // webAPIProviders are the providers with a working browserless transport
 // (spec 012).
 //
-// ChatGPT is deliberately absent. Its web transport is implemented and committed,
-// but a live turn proved it cannot work: the turn endpoint requires an
-// OpenAI-Sentinel-Turnstile-Token produced by the Sentinel VM, and every
-// programmatic request without one is rejected with 403 "Unusual activity",
-// including requests issued from inside the authenticated page. Reproducing it
-// needs a JavaScript engine — see spec 012 §3 — so ChatGPT stays on the DOM
-// transport until a live programmatic turn succeeds.
+// ChatGPT was excluded here on the ground that its turn endpoint required a
+// Turnstile token that could not be computed offline. That was wrong: a live
+// turn returns 200 + event-stream with only the cookie jar, a locally generated
+// requirements token and a solved proof-of-work — Turnstile is advisory for a
+// session holding a browser-earned cookie jar. See spec 012 §3.0.
 var webAPIProviders = map[string]bool{
 	ProviderQwen:     true,
 	ProviderDeepSeek: true,
+	ProviderChatGPT:  true,
 }
 
 // UseWebAPI reports whether the browserless transport should be used for the

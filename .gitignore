@@ -11,3 +11,7 @@ tenants/
 .DS_Store
 bin/
 last_copied_card.txt
+
+# Python
+__pycache__/
+*.pyc

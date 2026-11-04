@@ -12,20 +12,32 @@ import (
 	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/providers/webapi"
 	_ "github.com/chimera/chimera/internal/providers/webapi/all"
+	"github.com/go-rod/rod/lib/launcher"
 )
 
-const authUsage = `Usage: chimera auth <command>
+const authUsage = `Usage: chimera auth <command> [flags]
 
 Commands:
   login    Open a browser, wait for you to log in, and store the session
+  all      Log in to every provider in sequence (recommended)
+  check    Verify every stored session against its provider
   import   Validate and install an exported session file
   status   Show the stored session's validity and expiry
 
-Supported providers: qwen, deepseek, chatgpt (selected via PROVIDER=<name>)
+Providers: qwen, deepseek, chatgpt.
+  Select one with PROVIDER=<name> or pass it as the first argument:
+      chimera auth login chatgpt
+      chimera auth login --provider deepseek
+
+A browser window opens; log in there; the session is saved to
+AUTH_DIR/<provider>.json (mode 0600, password-equivalent).
 
 Flags:
   login:   -timeout <dur>   how long to wait for login (default 5m)
            -hold <dur>      keep the browser open after login (traffic capture)
+           -fresh           clear the browser profile first (force a real login)
+  all:     -timeout <dur>   per-provider wait (default 5m)
+  check:   (no flags)
   import:  -file <path>     exported session (default logs/<provider>-session.json)
            -verify <bool>   check against the provider (default true)
 `
@@ -91,18 +103,33 @@ func runAuth(args []string) {
 		fmt.Print(authUsage)
 		os.Exit(2)
 	}
+
+	// Pull a provider selector out of the arguments before config.Load(), so
+	// `chimera auth login chatgpt` works without exporting PROVIDER first. An
+	// explicit PROVIDER in the environment still wins, because that is what the
+	// rest of the system reads.
+	provider, rest := extractProvider(args[1:])
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
 	}
+	if provider != "" {
+		cfg.Provider = provider
+	}
+
 	switch args[0] {
 	case "login":
-		authLogin(cfg, args[1:])
+		authLogin(cfg, rest)
+	case "all":
+		authLoginAll(cfg, rest)
+	case "check":
+		authCheckAll(cfg)
 	case "import":
-		authImport(cfg, args[1:])
+		authImport(cfg, rest)
 	case "status":
-		authStatus(cfg, args[1:])
+		authStatus(cfg, rest)
 	case "help", "-h", "--help":
 		fmt.Print(authUsage)
 	default:
@@ -111,22 +138,76 @@ func runAuth(args []string) {
 	}
 }
 
+// extractProvider removes a provider selector from args, returning it and the
+// remaining arguments. It accepts both `login chatgpt` (positional) and
+// `login --provider chatgpt` (flag form).
+func extractProvider(args []string) (string, []string) {
+	out := make([]string, 0, len(args))
+	provider := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--provider" || a == "-provider" {
+			if i+1 < len(args) {
+				provider = args[i+1]
+				i++
+			}
+			continue
+		}
+		if v, ok := strings.CutPrefix(a, "--provider="); ok {
+			provider = v
+			continue
+		}
+		// A bare positional that names a known provider is a selector, but only
+		// if no flag has claimed it (so `-file chatgpt.json` is not misread).
+		if provider == "" && isKnownProvider(a) && !strings.HasPrefix(a, "-") {
+			provider = a
+			continue
+		}
+		out = append(out, a)
+	}
+	return provider, out
+}
+
+// isKnownProvider reports whether name is a provider with a browserless
+// transport (i.e. one `auth` can actually log in to).
+func isKnownProvider(name string) bool {
+	_, ok := authSpecs[name]
+	return ok
+}
+
 // authLogin opens Chromium, waits for the user to log in, and exports the
 // storage state (access token + cookies) into AUTH_DIR.
 func authLogin(cfg *config.Config, args []string) {
 	fs := flag.NewFlagSet("auth login", flag.ExitOnError)
 	timeout := fs.Duration("timeout", 5*time.Minute, "how long to wait for login")
 	hold := fs.Duration("hold", 0, "keep the browser open this long after login so traffic can be captured")
+	fresh := fs.Bool("fresh", false, "delete the browser profile first, forcing a real re-login")
 	_ = fs.Parse(args)
+
+	if *fresh {
+		profile := cfg.BrowserDataPath()
+		if err := os.RemoveAll(profile); err != nil {
+			fmt.Fprintf(os.Stderr, "clear profile %s: %v\n", profile, err)
+			os.Exit(1)
+		}
+		fmt.Printf("Cleared browser profile %s (forcing a fresh login).\n", profile)
+	}
 
 	spec, ok := authSpecs[cfg.Provider]
 	if !ok {
-		fmt.Fprintf(os.Stderr, "auth login supports %s only (PROVIDER=%s)\n", supportedAuthProviders(), cfg.Provider)
+		fmt.Fprintf(os.Stderr, "auth login supports %s only (got %q)\n", supportedAuthProviders(), cfg.Provider)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Opening %s — log in there; the window stays open.\n", cfg.ProviderURL())
-	fmt.Printf("Waiting for the session (up to %s)...\n", *timeout)
+	if err := browserAvailable(); err != nil {
+		fmt.Fprintf(os.Stderr, "no Chromium available: %v\n", err)
+		fmt.Fprintln(os.Stderr, "  A browser is required to log in — it is what earns the")
+		fmt.Fprintln(os.Stderr, "  cookies the browserless transport later replays.")
+		fmt.Fprintln(os.Stderr, "  Fix: install Chrome/Chromium, or run inside the Docker image.")
+		os.Exit(1)
+	}
+
+	printLoginInstructions(cfg.Provider, cfg.ProviderURL(), *timeout)
 
 	mgr := browser.NewManager(cfg)
 	page, err := mgr.Launch() // navigates to cfg.ProviderURL()
@@ -149,16 +230,7 @@ func authLogin(cfg *config.Config, args []string) {
 		}
 		if spec.CookieName != "" {
 			for _, c := range cookies {
-				name := c.Name
-				if spec.CookiePrefix {
-					name = strings.TrimPrefix(name, spec.CookieName)
-					if name == c.Name || !(name == "" || strings.HasPrefix(name, ".")) {
-						continue
-					}
-				} else if name != spec.CookieName {
-					continue
-				}
-				if c.Value != "" {
+				if cookieMatches(spec, c.Name) && c.Value != "" {
 					marker = spec.Marker
 					break
 				}
@@ -175,10 +247,11 @@ func authLogin(cfg *config.Config, args []string) {
 		}
 	}
 	if marker == "" {
+		fmt.Fprintf(os.Stderr, "\nTimed out after %s — no session found.\n", *timeout)
+		fmt.Fprintln(os.Stderr, "  The browser window was open; finish logging in there and re-run,")
+		fmt.Fprintln(os.Stderr, "  or give it longer:  chimera auth login "+cfg.Provider+" -timeout 10m")
 		if spec.CookieName != "" {
-			fmt.Fprintf(os.Stderr, "timed out waiting for login — no %s cookie\n", spec.CookieName)
-		} else {
-			fmt.Fprintln(os.Stderr, "timed out waiting for login — no session found")
+			fmt.Fprintf(os.Stderr, "  (looked for the %s* cookie)\n", spec.CookieName)
 		}
 		os.Exit(1)
 	}
@@ -225,6 +298,223 @@ func authLogin(cfg *config.Config, args []string) {
 		time.Sleep(*hold)
 	}
 	verifySession(cfg)
+}
+
+// browserAvailable reports whether a Chromium rod can drive exists. Login needs a
+// real browser: it is what earns the cookies the browserless transport replays.
+// Checking first turns an opaque launch failure into an actionable message.
+func browserAvailable() error {
+	// An explicit override wins (used by the Docker image and by tests).
+	if p := os.Getenv("CHROME_BIN"); p != "" {
+		if _, err := os.Stat(p); err != nil {
+			return fmt.Errorf("CHROME_BIN=%s: %w", p, err)
+		}
+		return nil
+	}
+	// rod's own lookup: a previously downloaded browser, or one on PATH.
+	if path, ok := launcher.LookPath(); ok {
+		_ = path
+		return nil
+	}
+	return fmt.Errorf("no Chromium found on PATH and none cached by rod")
+}
+
+// printLoginInstructions explains what to do in the window that is about to open.
+// The provider-specific notes matter: an OAuth flow that automation cannot
+// complete is the most common cause of a login that never lands.
+func printLoginInstructions(provider, url string, timeout time.Duration) {
+	fmt.Printf("\nOpening a Chromium window at %s\n\n", url)
+	fmt.Println("  Log in there. The window stays open until the session is detected.")
+	fmt.Println("  Use email + password, Microsoft, Apple, or a magic link.")
+	fmt.Println("  Do NOT use \"Sign in with Google\" — Google blocks automated browsers,")
+	fmt.Println("  and the login will never complete.")
+	switch provider {
+	case config.ProviderChatGPT:
+		fmt.Println("  ChatGPT keeps its credential in a session cookie; the bearer is")
+		fmt.Println("  minted from it later, so no token needs to be copied by hand.")
+	case config.ProviderDeepSeek:
+		fmt.Println("  DeepSeek stores its token in localStorage; the window must finish")
+		fmt.Println("  loading the chat UI for it to be written.")
+	case config.ProviderQwen:
+		fmt.Println("  Qwen stores its token in localStorage once the chat UI loads.")
+	}
+	fmt.Printf("\nWaiting for the session (up to %s)...\n", timeout)
+}
+
+// authLoginAll logs in to every provider in sequence. It exists because the
+// sessions expire on independent clocks (13-18 days observed), so refreshing them
+// one at a time is easy to forget and then hard to attribute when a gateway
+// starts 401ing.
+func authLoginAll(cfg *config.Config, args []string) {
+	fs := flag.NewFlagSet("auth all", flag.ExitOnError)
+	timeout := fs.Duration("timeout", 5*time.Minute, "per-provider wait for login")
+	_ = fs.Parse(args)
+
+	providers := []string{config.ProviderChatGPT, config.ProviderDeepSeek, config.ProviderQwen}
+	fmt.Printf("Logging in to %d providers in sequence. Each opens its own window.\n", len(providers))
+	fmt.Println("Finish the login in each window before the next opens.")
+
+	type outcome struct {
+		provider string
+		err      error
+	}
+	results := make([]outcome, 0, len(providers))
+	for _, p := range providers {
+		fmt.Printf("\n%s\n── %s %s\n", strings.Repeat("─", 62), strings.ToUpper(p), strings.Repeat("─", 62-len(p)))
+		child := *cfg
+		child.Provider = p
+		if err := loginOne(&child, *timeout); err != nil {
+			fmt.Fprintf(os.Stderr, "  %s: %v\n", p, err)
+			results = append(results, outcome{p, err})
+			continue
+		}
+		results = append(results, outcome{p, nil})
+	}
+
+	fmt.Printf("\n%s\nSummary\n%s\n", strings.Repeat("─", 62), strings.Repeat("─", 62))
+	failed := 0
+	for _, r := range results {
+		if r.err != nil {
+			failed++
+			fmt.Printf("  FAIL  %-10s %v\n", r.provider, r.err)
+			continue
+		}
+		fmt.Printf("  ok    %-10s session stored\n", r.provider)
+	}
+	if failed > 0 {
+		fmt.Printf("\n%d of %d providers need attention.\n", failed, len(results))
+		os.Exit(1)
+	}
+	fmt.Println("\nAll sessions stored. Start the gateway with TRANSPORT=webapi.")
+}
+
+// loginOne runs the login flow for a single provider, returning an error instead
+// of exiting so `auth all` can continue past a provider the user skipped.
+func loginOne(cfg *config.Config, timeout time.Duration) error {
+	spec, ok := authSpecs[cfg.Provider]
+	if !ok {
+		return fmt.Errorf("no login spec for provider %q", cfg.Provider)
+	}
+	mgr := browser.NewManager(cfg)
+	page, err := mgr.Launch()
+	if err != nil {
+		return fmt.Errorf("launch browser: %w", err)
+	}
+	defer mgr.Close()
+
+	var marker string
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(3 * time.Second)
+		cookies, err := page.Cookies([]string{cfg.ProviderURL()})
+		if err != nil {
+			continue
+		}
+		if spec.CookieName != "" {
+			for _, c := range cookies {
+				if cookieMatches(spec, c.Name) && c.Value != "" {
+					marker = spec.Marker
+					break
+				}
+			}
+		} else {
+			res, err := page.Eval(spec.TokenExpr)
+			if err != nil {
+				continue
+			}
+			marker = res.Value.Str()
+		}
+		if marker != "" {
+			break
+		}
+	}
+	if marker == "" {
+		return fmt.Errorf("timed out after %s waiting for login", timeout)
+	}
+
+	cookies, err := page.Cookies([]string{cfg.ProviderURL()})
+	if err != nil {
+		return fmt.Errorf("read cookies: %w", err)
+	}
+	jar := map[string]string{}
+	for _, c := range cookies {
+		if strings.Contains(c.Domain, spec.CookieHost) {
+			jar[c.Name] = c.Value
+		}
+	}
+	if len(jar) == 0 {
+		return fmt.Errorf("no %s cookies found after login", cfg.Provider)
+	}
+	sess := &webapi.Session{AccessToken: marker, Cookies: jar}
+	dst := cfg.SessionPath(cfg.Provider)
+	if err := webapi.WriteSession(sess, dst); err != nil {
+		return fmt.Errorf("write session: %w", err)
+	}
+	fmt.Printf("  stored %s (%d cookies)\n", dst, len(jar))
+
+	// Verify the exported session actually works. A stale browser profile makes
+	// this fail even though the poll "succeeded", so report it here rather than
+	// letting the gateway discover it later.
+	child := *cfg
+	ctor, ok := webapi.Lookup(cfg.Provider)
+	if !ok {
+		return nil
+	}
+	p := ctor(&child)
+	if err := p.Init(nil, &child); err != nil {
+		return fmt.Errorf("session stored but not usable: %w", err)
+	}
+	if ok, err := p.IsLoggedIn(); err != nil || !ok {
+		return fmt.Errorf("session stored but the provider rejected it")
+	}
+	fmt.Printf("  verified (%s)\n", p.ModelID())
+	return nil
+}
+
+// cookieMatches reports whether a cookie name satisfies the spec, honouring
+// prefix matching for NextAuth's chunked session cookie (<name>.0, <name>.1, …).
+func cookieMatches(spec authSpec, name string) bool {
+	if !spec.CookiePrefix {
+		return name == spec.CookieName
+	}
+	rest, ok := strings.CutPrefix(name, spec.CookieName)
+	if !ok {
+		return false
+	}
+	return rest == "" || strings.HasPrefix(rest, ".")
+}
+
+// authCheckAll verifies every stored session without opening a browser, using the
+// same credential probe the assessment script uses: the STORED BEARER (or cookie
+// jar) is what decides liveness, not a 200 from an unauthenticated endpoint.
+func authCheckAll(cfg *config.Config) {
+	providers := []string{config.ProviderChatGPT, config.ProviderDeepSeek, config.ProviderQwen}
+	fmt.Printf("Checking %d stored sessions (no browser).\n\n", len(providers))
+	bad := 0
+	for _, p := range providers {
+		child := *cfg
+		child.Provider = p
+		path := child.SessionPath(p)
+		sess, err := webapi.LoadSession(path)
+		if err != nil {
+			fmt.Printf("  MISSING  %-10s %v\n", p, err)
+			bad++
+			continue
+		}
+		st := sess.Status(path)
+		age := ""
+		if fi, err := os.Stat(path); err == nil {
+			age = fmt.Sprintf("  age=%.0fh", time.Since(fi.ModTime()).Hours())
+		}
+		fmt.Printf("  %-8s %-10s %d cookies%s\n", "found", p, st.Cookies, age)
+	}
+	if bad > 0 {
+		fmt.Printf("\n%d provider(s) have no stored session. Run: chimera auth all\n", bad)
+	}
+	// The live probe is delegated to scripts/provider_assessment.py, which tests
+	// the credential end to end; duplicating it here would give two answers.
+	fmt.Println("\nFor a live credential check, run:")
+	fmt.Println("  python3 scripts/provider_assessment.py")
 }
 
 // devtoolsPort returns the CDP port of the provider's running browser, read from
@@ -297,6 +587,7 @@ func verifySession(cfg *config.Config) {
 	p := ctor(cfg)
 	if err := p.Init(nil, cfg); err != nil {
 		fmt.Printf("  provider check: FAILED — %v\n", err)
+		warnStaleProfile(cfg)
 		os.Exit(1)
 	}
 	// Init reports a transient probe failure as inconclusive so a CDN hiccup does
@@ -304,12 +595,29 @@ func verifySession(cfg *config.Config) {
 	// real error (a wrong endpoint, a rejected cookie) instead of a misleading OK.
 	if ok, err := p.IsLoggedIn(); err != nil {
 		fmt.Printf("  provider check: FAILED — %v\n", err)
+		warnStaleProfile(cfg)
 		os.Exit(1)
 	} else if !ok {
 		fmt.Printf("  provider check: FAILED — session not accepted\n")
+		warnStaleProfile(cfg)
 		os.Exit(1)
 	}
 	fmt.Printf("  provider check: OK (%s)\n", p.ModelID())
+}
+
+// warnStaleProfile explains the most common cause of a login that "succeeds" but
+// produces a dead session: the persistent browser profile still holds an expired
+// login, so the poll sees the old cookie immediately and exports it again. The
+// fix is to start from a clean profile, not to log in more carefully.
+func warnStaleProfile(cfg *config.Config) {
+	profile := cfg.BrowserDataPath()
+	if _, err := os.Stat(profile); err != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n  Note: the browser profile at %s was reused.\n", profile)
+	fmt.Fprintln(os.Stderr, "  If you were already logged in there, its OLD cookie was exported.")
+	fmt.Fprintln(os.Stderr, "  To force a fresh login, remove the profile and retry:")
+	fmt.Fprintf(os.Stderr, "      rm -rf %s && chimera auth login %s\n", profile, cfg.Provider)
 }
 
 func supportedAuthProviders() string {

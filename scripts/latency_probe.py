@@ -76,12 +76,21 @@ POST_RE = re.compile(
 SEND_RE = re.compile(r"Sending message \(thread=\S+, len=(?P<len>\d+)\)")
 REJECT_RE = re.compile(r"Pre-flight reject: prompt (?P<len>\d+) chars exceeds")
 LEDGER_RE = re.compile(r"ANV_CONTEXT_LEDGER (?P<json>\{[^\n]*\})")
-# qwenweb provider: per-turn usage line (transport reports real tokens).
+# Webapi providers: per-turn usage line. The transports report different fields,
+# so the token-count group is optional:
+#   qwen     : turn done chat=<id> prompt_chars=N in=N out=N cached=N ttft_ms=N
+#              total_ms=N gen_ms=N out_tok_s=N reasoning_chars=N
+#   chatgpt  : turn done conversation=<id> prompt_chars=N ttft_ms=N total_ms=N
+#              gen_ms=N reasoning_chars=N          (no token counts)
+#   deepseek : turn done session=<id> prompt_chars=N in=N out=N ttft_ms=N
+#              total_ms=N gen_ms=N out_tok_s=N reasoning_chars=N
 WEBAPI_TURN_RE = re.compile(
-    r"turn done chat=(?P<chat>\S+) prompt_chars=(?P<prompt>\d+) in=(?P<in>\d+) "
-    r"out=(?P<out>\d+) cached=(?P<cached>\d+) ttft_ms=(?P<ttft>\d+) "
-    r"total_ms=(?P<total>\d+) gen_ms=(?P<gen>\d+) out_tok_s=(?P<tps>[0-9.]+) "
-    r"reasoning_chars=(?P<reason>\d+)"
+    r"turn done (?:\w+)=(?P<chat>\S+) prompt_chars=(?P<prompt>\d+)"
+    r"(?: in=(?P<in>\d+) out=(?P<out>\d+))?"
+    r"(?: cached=(?P<cached>\d+))?"
+    r" ttft_ms=(?P<ttft>\d+) total_ms=(?P<total>\d+) gen_ms=(?P<gen>\d+)"
+    r"(?: out_tok_s=(?P<tps>[0-9.]+))?"
+    r" reasoning_chars=(?P<reason>\d+)"
 )
 
 _DUR_UNITS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3,
@@ -112,15 +121,20 @@ def parse_rounds(text: str) -> list:
         m = WEBAPI_TURN_RE.search(line)
         if m:
             pending = int(m.group("prompt"))
+            # Token counts are absent on the chatgpt transport, so each field is
+            # parsed independently rather than assumed present.
             tok = {
-                "in_tok": int(m.group("in")),
-                "out_tok": int(m.group("out")),
-                "cached_tok": int(m.group("cached")),
                 "ttft_ms": int(m.group("ttft")),
                 "gen_ms": int(m.group("gen")),
-                "tps": float(m.group("tps")),
                 "reason_chars": int(m.group("reason")),
             }
+            for field, key in (("in", "in_tok"), ("out", "out_tok"),
+                               ("cached", "cached_tok")):
+                v = m.group(field)
+                if v is not None:
+                    tok[key] = int(v)
+            if m.group("tps") is not None:
+                tok["tps"] = float(m.group("tps"))
             continue
         m = SEND_RE.search(line) or REJECT_RE.search(line)
         if m:

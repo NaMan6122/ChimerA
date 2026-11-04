@@ -54,6 +54,10 @@ func (p *Provider) Name() string { return config.ProviderChatGPT }
 // ModelID stays identical to the DOM transport so clients do not change.
 func (p *Provider) ModelID() string { return "chimera-chatgpt" }
 
+// Browserless reports that this transport replays the web API, so the DOM
+// send-button length limit does not apply.
+func (p *Provider) Browserless() bool { return true }
+
 // Init loads the storage-state session and mints a bearer from its cookie jar.
 // The rod.Page argument is unused (the interface still carries it until spec
 // 011's transport split lands).
@@ -115,9 +119,9 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 	p.mu.Unlock()
 
 	gen := res.Duration - res.TTFT
-	p.log.Infof("turn done conversation=%s prompt_chars=%d ttft_ms=%d total_ms=%d gen_ms=%d",
+	p.log.Infof("turn done conversation=%s prompt_chars=%d ttft_ms=%d total_ms=%d gen_ms=%d reasoning_chars=%d",
 		shortID(res.Conversation), len(text),
-		res.TTFT.Milliseconds(), res.Duration.Milliseconds(), gen.Milliseconds())
+		res.TTFT.Milliseconds(), res.Duration.Milliseconds(), gen.Milliseconds(), len(res.Reasoning))
 
 	return &models.ProviderResponse{
 		Message:   res.Content,
@@ -154,8 +158,8 @@ func (p *Provider) IsLoggedIn() (bool, error) {
 	return p.client.IsLoggedIn()
 }
 
-// SessionExpiry reports the cookie-token's expiry when it is a JWT. ChatGPT is
-// cookie-custody, so a missing exp claim is normal, not an error.
+// SessionExpiry reports the token's expiry when it carries an exp claim. ChatGPT
+// is cookie-custody, so a missing exp claim is normal, not an error.
 func (p *Provider) SessionExpiry() (time.Time, bool) {
 	if p.sess == nil {
 		return time.Time{}, false
