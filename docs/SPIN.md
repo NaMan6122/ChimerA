@@ -24,16 +24,40 @@ The gateway does the rest: `X-Session-Id` pins one upstream conversation, and
 already holds. Because the harness never needs the transcript back, it also
 never parses or stores it — `s.rounds` holds latency and character counts only.
 
+## Install
+
+```bash
+./build.sh                # build + install into ~/.local
+./build.sh --no-install   # build into ./bin only
+./build.sh --prefix=/opt  # different prefix
+```
+
+Same layout as `anv` — a versioned directory plus a stable symlink on PATH:
+
+```
+~/.local/share/chimera/versions/<version>/chimera
+~/.local/share/chimera/versions/<version>/chimera-spin
+~/.local/bin/chimera       -> .../versions/<version>/chimera
+~/.local/bin/chimera-spin  -> .../versions/<version>/chimera-spin
+```
+
+The version is `git describe --tags --always --dirty`, stamped into the binary;
+`chimera-spin -version` prints it.
+
 ## Usage
 
 ```bash
-go build -o chimera-spin ./cmd/chimera-spin
-
 # a gateway must be running, e.g.
-TRANSPORT=webapi PROVIDER=chatgpt API_PORT=8000 ./chimera
+TRANSPORT=webapi PROVIDER=chatgpt chimera
 
-./chimera-spin "Where is MAX_PROMPT_CHARS enforced and which transports are exempt?"
-./chimera-spin -model chimera-deepseek -max-rounds 6 -json report.json "..."
+chimera-spin "Where is MAX_PROMPT_CHARS enforced and which transports are exempt?"
+chimera-spin -model chimera-deepseek -max-rounds 6 -json report.json "..."
+```
+
+From outside the repository, point `-root` at it:
+
+```bash
+cd /tmp && chimera-spin -root ~/Documents/Projects/ChimerA "..."
 ```
 
 Flags: `-base-url` (default `http://localhost:8000/v1`), `-token` (or

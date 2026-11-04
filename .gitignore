@@ -11,7 +11,9 @@ tenants/
 .DS_Store
 bin/
 last_copied_card.txt
-chimera-spin
+# Root build artifact only: a bare "chimera-spin" would also ignore the
+# cmd/chimera-spin source directory.
+/chimera-spin
 
 # Python
 __pycache__/

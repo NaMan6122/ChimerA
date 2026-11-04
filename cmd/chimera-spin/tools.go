@@ -139,10 +139,21 @@ func (s *spin) readFile(args map[string]any) string {
 		end = len(lines)
 	}
 	var b strings.Builder
+	truncatedAt := 0
 	for i := start; i <= end; i++ {
-		fmt.Fprintf(&b, "%d: %s\n", i, lines[i-1])
+		line := fmt.Sprintf("%d: %s\n", i, lines[i-1])
+		if b.Len()+len(line) > maxToolOutput {
+			truncatedAt = i
+			break
+		}
+		b.WriteString(line)
 	}
-	return clip(b.String())
+	if truncatedAt > 0 {
+		// Actionable, not just informative: on a 1,400-line file the model
+		// otherwise stops and reports that it cannot see the rest.
+		fmt.Fprintf(&b, "… [truncated at %d bytes; continue with startLine=%d]\n", maxToolOutput, truncatedAt)
+	}
+	return b.String()
 }
 
 func (s *spin) listDir(args map[string]any) string {

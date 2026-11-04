@@ -81,8 +81,12 @@ type config struct {
 	jsonOut   string
 }
 
+// version is stamped at install time with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	var cfg config
+	var showVersion bool
 	flag.StringVar(&cfg.baseURL, "base-url", envOr("CHIMERA_BASE_URL", "http://localhost:8000/v1"), "gateway base URL")
 	flag.StringVar(&cfg.token, "token", envOr("CHIMERA_API_KEY", "chimera"), "bearer token")
 	flag.StringVar(&cfg.model, "model", "chimera-chatgpt", "model id")
@@ -93,7 +97,13 @@ func main() {
 	flag.StringVar(&cfg.jsonOut, "json", "", "write a run report as JSON")
 	var prompt string
 	flag.StringVar(&prompt, "task", "", "task for the agent (or pass it as the last argument)")
+	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println("chimera-spin " + version)
+		return
+	}
 
 	task := prompt
 	if task == "" && flag.NArg() > 0 {
@@ -242,7 +252,13 @@ func (s *spin) complete(msgs []message, withTools bool) (message, time.Duration,
 	t0 := time.Now()
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return message{}, 0, err
+		return message{}, 0, fmt.Errorf(`cannot reach the Chimera gateway at %s
+  %v
+
+  Start it first:
+    TRANSPORT=webapi PROVIDER=chatgpt ./chimera
+  or point this harness elsewhere:
+    chimera-spin -base-url http://host:port/v1 "..."`, s.cfg.baseURL, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))

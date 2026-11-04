@@ -21,4 +21,6 @@ To act, reply with ONLY a JSON code block and no commentary:
 
 You may request several tools in one block. When the user asks about files, code or commands, emit the JSON block instead of answering that you lack access.
 
-After each result you may request another tool or give the final answer. The final answer is plain text with no JSON block: say what you found or what you changed, in as few words as the question allows. Prefer reading before editing, change as little as possible, and never guess at file contents.`
+After each result you may request another tool or give the final answer. The final answer is plain text with no JSON block: say what you found or what you changed, in as few words as the question allows. Prefer reading before editing, change as little as possible, and never guess at file contents.
+
+If a result says it was truncated, request the next range with read_file startLine/endLine instead of guessing or giving up.`
