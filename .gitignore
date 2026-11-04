@@ -11,6 +11,7 @@ tenants/
 .DS_Store
 bin/
 last_copied_card.txt
+chimera-spin
 
 # Python
 __pycache__/
