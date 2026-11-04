@@ -28,6 +28,24 @@ func TestParseToolCalls(t *testing.T) {
 			want: 1,
 		},
 		{
+			// Measured from DeepSeek: aliased container.
+			name: "aliased tool/args",
+			in:   "{\"tool\":\"list_dir\",\"args\":{\"path\":\"internal\"}}",
+			want: 1, path: "internal",
+		},
+		{
+			// Measured from DeepSeek: arguments inlined beside the name.
+			name: "inline arguments",
+			in:   "```json\n{\"tool\": \"list_dir\", \"path\": \"internal/spin\"}\n```",
+			want: 1, path: "internal/spin",
+		},
+		{
+			// Measured from DeepSeek: a batch as a bare array.
+			name: "bare array batch",
+			in:   "[{\"tool\":\"list_dir\",\"args\":{\"path\":\"cmd\"}},{\"tool\":\"read_file\",\"args\":{\"path\":\"go.mod\"}}]",
+			want: 2,
+		},
+		{
 			name: "plain prose is not a call",
 			in:   "I could not find that file.",
 			want: 0,
@@ -48,6 +66,30 @@ func TestParseToolCalls(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestParseDSML covers DeepSeek's native markup, which appears instead of JSON
+// on some turns. Tag spelling varies, so the parser matches the structure.
+func TestParseDSML(t *testing.T) {
+	sample := "<｜｜DSML｜｜tool_calls>\n" +
+		"<｜｜DSML｜｜invoke name=\"list_dir\">\n" +
+		"<｜｜DSML｜｜parameter name=\"path\">internal/spin</｜｜DSML｜｜parameter>\n" +
+		"</｜｜DSML｜｜invoke>\n" +
+		"<｜｜DSML｜｜invoke name=\"read_file\">\n" +
+		"<｜｜DSML｜｜parameter name=\"path\">internal/spin/runner.go</｜｜DSML｜｜parameter>\n" +
+		"</｜｜DSML｜｜invoke>\n" +
+		"</｜｜DSML｜｜tool_calls>"
+
+	got := ParseToolCalls(sample)
+	if len(got) != 2 {
+		t.Fatalf("got %d calls, want 2: %+v", len(got), got)
+	}
+	if got[0].Function.Name != "list_dir" || got[0].Function.Arguments != `{"path":"internal/spin"}` {
+		t.Errorf("call 0 = %+v", got[0])
+	}
+	if got[1].Function.Name != "read_file" {
+		t.Errorf("call 1 = %+v", got[1])
 	}
 }
 

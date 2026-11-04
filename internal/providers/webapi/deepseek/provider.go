@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,6 +98,14 @@ func (p *Provider) Init(_ *rod.Page, cfg *config.Config) error {
 	return nil
 }
 
+// staleConversation reports the vendor's signal that the parent message id we
+// chained to no longer exists. Matched loosely because it arrives wrapped in a
+// JSON body with a mislabelled content type.
+func staleConversation(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "invalid message id") || strings.Contains(s, `"biz_code":26`)
+}
+
 // SendMessage performs one turn. A stable threadID reuses its conversation;
 // otherwise a new chat session is created.
 func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderResponse, error) {
@@ -115,8 +124,32 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 	}
 
 	res, err := p.client.Send(conv.sessionID, conv.parentID, text, p.cfg.DeepSeekWebThinking)
+
+	// The vendor invalidates a parent message id when a conversation is reset
+	// server-side (or when two requests race for the same parent). Every later
+	// turn then fails with biz_code 26 "invalid message id" — permanently, until
+	// someone refreshes. Recover here instead of requiring a restart.
+	if err != nil && staleConversation(err) {
+		p.log.Warnf("deepseek conversation went stale (%v); retrying on a fresh chat", err)
+		if fresh, cerr := p.client.CreateChatSession(); cerr == nil {
+			conv = convState{sessionID: fresh}
+			res, err = p.client.Send(conv.sessionID, "", text, p.cfg.DeepSeekWebThinking)
+		}
+	}
 	if err != nil {
 		return nil, err
+	}
+
+	// A successful-but-empty turn is the same fault one step later: the call is
+	// accepted, nothing comes back. Retry once from a fresh conversation.
+	if strings.TrimSpace(res.Content) == "" && conv.parentID != "" {
+		p.log.Warnf("deepseek returned an empty turn; retrying on a fresh chat")
+		if fresh, cerr := p.client.CreateChatSession(); cerr == nil {
+			if retry, rerr := p.client.Send(fresh, "", text, p.cfg.DeepSeekWebThinking); rerr == nil && strings.TrimSpace(retry.Content) != "" {
+				conv = convState{sessionID: fresh}
+				res = retry
+			}
+		}
 	}
 
 	p.mu.Lock()

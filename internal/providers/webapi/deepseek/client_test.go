@@ -300,6 +300,40 @@ func TestRegistryHasDeepSeek(t *testing.T) {
 	}
 }
 
+// TestRateLimitHintIsAnError pins the vendor's refusal path: a rate limit arrives
+// as an in-stream hint with no HTTP error, and used to be parsed as a successful
+// turn with empty content — which looked like the model refusing to use tools.
+func TestRateLimitHintIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/chat_session/create"):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"code":0,"data":{"biz_data":{"chat_session":{"id":"sess-1"}}}}`)
+		case strings.HasSuffix(r.URL.Path, "/create_pow_challenge"):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"code":0,"data":{"biz_data":{"challenge":{"challenge":%q,"salt":%q,"expire_at":%d,"difficulty":144000}}}}`,
+				vecChallenge, vecSalt, vecExpireAt)
+		default:
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "event: ready\n\ndata: {\"request_message_id\":1,\"response_message_id\":2}\n\n")
+			fmt.Fprint(w, "event: hint\n\ndata: {\"type\":\"error\",\"content\":\"Messages too frequent. Try again later.\",\"finish_reason\":\"rate_limit_reached\"}\n\n")
+			fmt.Fprint(w, "event: close\n\ndata: {\"click_behavior\":\"retry\"}\n\n")
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(&webapi.Session{AccessToken: "t", Cookies: map[string]string{"aws-waf-token": "x"}}, 30*time.Second)
+	c.BaseURL = srv.URL
+
+	_, err := c.Send("sess-1", "", "hi", false)
+	if err == nil {
+		t.Fatal("a rate-limit hint must surface as an error, not an empty answer")
+	}
+	if !strings.Contains(err.Error(), "too frequent") {
+		t.Fatalf("error does not carry the vendor message: %v", err)
+	}
+}
+
 // parent_message_id must be a JSON number, not a string: the server types it as
 // u32 and rejects a string with HTTP 422. This only bites on the *second* turn of
 // a conversation (the first sends null), so a single-turn test would miss it —

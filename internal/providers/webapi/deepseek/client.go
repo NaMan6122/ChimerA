@@ -310,6 +310,18 @@ func (c *Client) Send(sessionID, parentID, prompt string, thinking bool) (*Strea
 			continue
 		}
 
+		// The vendor reports refusals as an in-stream hint, not an HTTP status.
+		// Ignoring it turned a rate limit into a successful turn with no content,
+		// which downstream looked exactly like "the model refused to answer".
+		var hint struct {
+			Type         string `json:"type"`
+			Content      string `json:"content"`
+			FinishReason string `json:"finish_reason"`
+		}
+		if json.Unmarshal([]byte(data), &hint) == nil && hint.Type == "error" && hint.Content != "" {
+			return nil, fmt.Errorf("deepseek: %s (%s)", hint.Content, hint.FinishReason)
+		}
+
 		// event: ready announces the ids before any patch arrives.
 		if event == "ready" {
 			if doc.ResponseMessageID != 0 {
