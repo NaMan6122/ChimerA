@@ -1,10 +1,10 @@
-package main
+package spin
 
 import "testing"
 
-// TestParseToolCalls pins the shapes the web model actually emits: a fenced
-// json block, a bare single-call object, and nested argument objects that a
-// naive brace scan would cut in half.
+// TestParseToolCalls pins the shapes the web model actually emits: a fenced json
+// block, a bare single-call object, and nested argument objects that a naive
+// brace scan would cut in half.
 func TestParseToolCalls(t *testing.T) {
 	cases := []struct {
 		name string
@@ -35,7 +35,7 @@ func TestParseToolCalls(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseToolCalls(tc.in)
+			got := ParseToolCalls(tc.in)
 			if len(got) != tc.want {
 				t.Fatalf("got %d calls, want %d (%+v)", len(got), tc.want, got)
 			}
@@ -51,16 +51,36 @@ func TestParseToolCalls(t *testing.T) {
 	}
 }
 
-// TestResolveConfinesToWorkspace is the safety property: a model must not be able
-// to read or write outside the workspace it was given.
+// TestResolveConfinesToWorkspace is the safety property: a model must not read or
+// write outside the workspace it was given.
 func TestResolveConfinesToWorkspace(t *testing.T) {
-	root := t.TempDir()
+	e := &Executor{Root: t.TempDir()}
 	for _, bad := range []string{"../outside", "../../etc/passwd", "/etc/passwd"} {
-		if _, err := resolve(root, bad); err == nil {
-			t.Errorf("resolve(%q) should have been rejected", bad)
+		if _, err := e.Resolve(bad); err == nil {
+			t.Errorf("Resolve(%q) should have been rejected", bad)
 		}
 	}
-	if _, err := resolve(root, "internal/api/server.go"); err != nil {
+	if _, err := e.Resolve("internal/api/server.go"); err != nil {
 		t.Errorf("relative path rejected: %v", err)
+	}
+}
+
+// TestLooksLikeRepoQuestion pins the heuristic that decides whether a zero-tool
+// answer gets challenged. The case-sensitive half matters: under (?i) every
+// two-letter word matched and "Reply with exactly: READY" was nudged.
+func TestLooksLikeRepoQuestion(t *testing.T) {
+	for _, yes := range []string{
+		"what does applyStealth do to navigator.webdriver?",
+		"summarise internal/api/server.go",
+		"read the README",
+	} {
+		if !LooksLikeRepoQuestion(yes) {
+			t.Errorf("expected repo question: %q", yes)
+		}
+	}
+	for _, no := range []string{"Reply with exactly: READY", "what is 17 times 23"} {
+		if LooksLikeRepoQuestion(no) {
+			t.Errorf("not a repo question: %q", no)
+		}
 	}
 }

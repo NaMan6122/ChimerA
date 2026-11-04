@@ -2,8 +2,9 @@
 #
 # build.sh — build and install Chimera's two independent programs.
 #
-#   ./build.sh                build + install both
-#   ./build.sh spin           the harness only (a plain HTTP client, no backend)
+#   ./build.sh                build + install everything
+#   ./build.sh spin           headless harness only (no backend needed to build)
+#   ./build.sh chat           interactive TUI only
 #   ./build.sh gateway        the gateway only
 #   ./build.sh spin --no-install
 #   ./build.sh --prefix=/opt spin
@@ -25,7 +26,7 @@ TARGET=all
 
 for arg in "$@"; do
     case "$arg" in
-        all|gateway|spin) TARGET="$arg" ;;
+        all|gateway|spin|chat) TARGET="$arg" ;;
         --no-install)     INSTALL=0 ;;
         --prefix=*)       PREFIX="${arg#*=}" ;;
         -h|--help)        sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -50,9 +51,14 @@ build() {
 
 echo "==> chimera build: target=$TARGET version=$VERSION cgo=off"
 case "$TARGET" in
-    all)     build chimera ./cmd/chimera; build chimera-spin ./cmd/chimera-spin ;;
+    all)
+        build chimera ./cmd/chimera
+        build chimera-spin ./cmd/chimera-spin
+        build chimera-chat ./cmd/chimera-chat
+        ;;
     gateway) build chimera ./cmd/chimera ;;
     spin)    build chimera-spin ./cmd/chimera-spin ;;
+    chat)    build chimera-chat ./cmd/chimera-chat ;;
 esac
 
 if [ "$INSTALL" -eq 0 ]; then

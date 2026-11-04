@@ -1,4 +1,4 @@
-package main
+package spin
 
 import (
 	"bytes"
@@ -14,13 +14,12 @@ type rawCall struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-// parseToolCalls extracts a tool call batch from assistant text.
+// ParseToolCalls extracts a tool-call batch from assistant text.
 //
 // The harness parses this itself instead of relying on the gateway, because the
-// gateway only parses calls when the request declares tool schemas — and
-// declaring schemas on every turn is precisely the history accumulation this
-// harness avoids. Turn 1 declares them; every later turn ships only results.
-func parseToolCalls(content string) []toolCall {
+// gateway only parses calls when the request declares schemas — and declaring
+// schemas on every turn is the accumulation this design avoids.
+func ParseToolCalls(content string) []ToolCall {
 	body := extractJSON(content)
 	if body == "" {
 		return nil
@@ -40,7 +39,7 @@ func parseToolCalls(content string) []toolCall {
 		calls = []rawCall{single}
 	}
 
-	out := make([]toolCall, 0, len(calls))
+	out := make([]ToolCall, 0, len(calls))
 	for i, rc := range calls {
 		if rc.Name == "" {
 			continue
@@ -55,21 +54,17 @@ func parseToolCalls(content string) []toolCall {
 		} else {
 			args = compact.String()
 		}
-		out = append(out, toolCall{
-			ID:   fmt.Sprintf("call_%d", i+1),
-			Type: "function",
-			Function: struct {
-				Name      string `json:"name"`
-				Arguments string `json:"arguments"`
-			}{Name: rc.Name, Arguments: args},
-		})
+		var tc ToolCall
+		tc.ID = fmt.Sprintf("call_%d", i+1)
+		tc.Type = "function"
+		tc.Function.Name = rc.Name
+		tc.Function.Arguments = args
+		out = append(out, tc)
 	}
 	return out
 }
 
 // extractJSON returns the first JSON object in text, preferring a fenced block.
-// The web model wraps its calls in ```json fences, but not always in the same
-// place, so fenced and bare forms are both handled.
 func extractJSON(text string) string {
 	if i := strings.Index(text, "```json"); i >= 0 {
 		start := i + len("```json")

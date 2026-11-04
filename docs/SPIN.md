@@ -80,6 +80,44 @@ A run prints the answer on stdout and a report on stderr:
 [spin]   round 3: 7224 chars, 6.3s, tools=[]
 ```
 
+## Interactive TUI
+
+`chimera-chat` is the same loop with a transcript, a tool trace and a status
+line:
+
+```bash
+chimera-chat                                  # current directory as the workspace
+chimera-chat -model chimera-deepseek
+```
+
+```
+ Chimera · chimera-chatgpt · …chat-1793832
+──────────────────────────────────────────
+› what does applyStealth do to navigator.webdriver?
+  · round 1 · 1.2k chars · 4.1s
+  ⚙ grep applyStealth
+    internal/browser/stealth.go:12:func applyStealth(page *rod.Page) {  (96 chars)
+  ⚙ read_file internal/browser/stealth.go
+    1: package browser  (3.5k chars)
+  · round 4 · 3.5k chars · 4.7s
+It redefines navigator.webdriver to return undefined …
+──────────────────────────────────────────
+› ▊
+enter send · /new new session · esc quit
+```
+
+The transcript you see is **local only**. Nothing in it is sent back as a
+prefix: the first message of a session carries the system prompt and tool
+schemas, and every later message carries only what you typed (`Client.Turns`
+decides this). `/new` resets the upstream conversation and the next message
+starts it again.
+
+Keys: `enter` send · `ctrl+j` newline · `/new` fresh session · `/help` · `esc`
+quit.
+
+`chimera-chat` links a TUI toolkit (bubbletea); `chimera-spin` stays
+stdlib-only, and both share `internal/spin` for the protocol and tools.
+
 ## One harness, any backend
 
 The harness names no provider. Point it at whichever gateway is running:
