@@ -12,7 +12,8 @@ import (
 type EventKind int
 
 const (
-	EventRound  EventKind = iota // a request completed
+	EventTask   EventKind = iota // a task was accepted (recorded, never replayed)
+	EventRound                   // a request completed
 	EventTool                    // a tool is about to run
 	EventResult                  // a tool returned
 	EventNudge                   // the model answered without evidence; asking again
@@ -72,6 +73,7 @@ func (r *Runner) emit(ev Event) {
 // Run performs one task and returns the final answer plus its accounting.
 func (r *Runner) Run(task string) (Result, error) {
 	res := Result{}
+	r.emit(Event{Kind: EventTask, Text: task})
 	// The system prompt and the tool schemas go out once per upstream
 	// conversation, not once per task: in a chat, turns 2..n carry only what the
 	// user just typed.

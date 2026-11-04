@@ -24,9 +24,10 @@ var version = "dev"
 func main() {
 	var (
 		baseURL, token, model, session, root, jsonOut, task string
+		sessionsDir                                         string
 		maxRounds                                           int
 		timeout                                             time.Duration
-		showVersion                                         bool
+		showVersion, noSave                                 bool
 	)
 	flag.StringVar(&baseURL, "base-url", envOr("CHIMERA_BASE_URL", "http://localhost:8000/v1"), "gateway base URL")
 	flag.StringVar(&token, "token", envOr("CHIMERA_API_KEY", "chimera"), "bearer token")
@@ -37,6 +38,8 @@ func main() {
 	flag.DurationVar(&timeout, "timeout", 180*time.Second, "per-turn HTTP timeout")
 	flag.StringVar(&jsonOut, "json", "", "write a run report as JSON")
 	flag.StringVar(&task, "task", "", "task for the agent (or pass it as the last argument)")
+	flag.StringVar(&sessionsDir, "sessions-dir", spin.DefaultSessionsDir(), "where session transcripts are saved")
+	flag.BoolVar(&noSave, "no-save", false, "do not write a session transcript")
 	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
 	flag.Parse()
 
@@ -78,8 +81,25 @@ flags:`)
 	}
 	client.Refresh()
 
+	// The transcript is a side-channel: it observes the loop and never feeds
+	// anything back into a request.
+	var rec *spin.Recorder
+	if !noSave {
+		if r, rerr := spin.NewRecorder(sessionsDir); rerr == nil {
+			r.Start(session, model, baseURL, absRoot)
+			rec = r
+			defer rec.Close()
+			fmt.Fprintf(os.Stderr, "[spin] transcript %s\n", r.Path())
+		} else {
+			fmt.Fprintf(os.Stderr, "[spin] transcript disabled: %v\n", rerr)
+		}
+	}
+
 	runner := spin.NewRunner(client, &spin.Executor{Root: absRoot}, maxRounds)
 	runner.OnEvent = func(ev spin.Event) {
+		if rec != nil {
+			rec.Observe(ev)
+		}
 		if ev.Kind == spin.EventNudge {
 			fmt.Fprintln(os.Stderr, "[spin] no tool calls on a repo question — asking for evidence")
 		}
@@ -88,6 +108,9 @@ flags:`)
 	started := time.Now()
 	res, err := runner.Run(task)
 	if err != nil {
+		if rec != nil {
+			rec.Note("error", err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "spin:", err)
 		os.Exit(1)
 	}

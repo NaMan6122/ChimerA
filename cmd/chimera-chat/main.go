@@ -91,6 +91,10 @@ type model struct {
 	palItems   []palItem
 	palIndex   int
 	palLoading bool
+
+	// Session transcript. Observational only: nothing is ever sent back from it.
+	sessionsDir string
+	rec         *spin.Recorder
 }
 
 // backendsMsg carries a completed discovery scan. target is set when a /use
@@ -103,6 +107,7 @@ type backendsMsg struct {
 func main() {
 	var (
 		baseURL, token, modelID, session, root string
+		sessionsDir                            string
 		maxRounds                              int
 		showVersion                            bool
 	)
@@ -112,6 +117,9 @@ func main() {
 	flag.StringVar(&session, "session", "", "session id (default: a fresh one)")
 	flag.StringVar(&root, "root", ".", "workspace root the tools are confined to")
 	flag.IntVar(&maxRounds, "max-rounds", 8, "hard stop on tool rounds per message")
+	flag.StringVar(&sessionsDir, "sessions-dir", spin.DefaultSessionsDir(), "where session transcripts are saved")
+	var noSave bool
+	flag.BoolVar(&noSave, "no-save", false, "do not write a session transcript")
 	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
 	var listBackends bool
 	flag.BoolVar(&listBackends, "list-backends", false, "probe local gateways, print what answers, and exit")
@@ -154,15 +162,32 @@ func main() {
 	client.Refresh()
 
 	m := &model{
-		client:     client,
-		msgs:       make(chan tea.Msg, 256),
-		token:      token,
-		root:       absRoot,
-		maxRounds:  maxRounds,
-		probePorts: portRange(8000, 8011),
-		autoScroll: true,
+		client:      client,
+		msgs:        make(chan tea.Msg, 256),
+		token:       token,
+		root:        absRoot,
+		maxRounds:   maxRounds,
+		probePorts:  portRange(8000, 8011),
+		autoScroll:  true,
+		sessionsDir: sessionsDir,
 	}
 	m.rewire()
+
+	// Transcript: written for the user, never read back into a request.
+	if !noSave {
+		if rec, rerr := spin.NewRecorder(sessionsDir); rerr == nil {
+			rec.Start(session, modelID, baseURL, absRoot)
+			m.rec = rec
+			defer rec.Close()
+		} else {
+			fmt.Fprintf(os.Stderr, "transcript disabled: %v\n", rerr)
+		}
+	}
+	// Reopening a session id restores its transcript for display only; the loop
+	// still starts with an empty prompt budget.
+	if recs, rerr := spin.LoadTranscript(sessionsDir, session); rerr == nil && len(recs) > 0 {
+		m.restore(recs)
+	}
 
 	m.input = textarea.New()
 	m.input.Placeholder = "Ask about this repo…  (enter to send, /new for a fresh session, esc to quit)"
@@ -293,6 +318,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.rounds = 0
 		if msg.err != nil {
+			if m.rec != nil {
+				m.rec.Note("error", msg.err.Error())
+			}
 			m.append(kindError, msg.err.Error())
 		} else if msg.res.Text != "" && msg.res.Text != strings.TrimSpace(msg.res.Text) {
 			m.append(kindAssistant, msg.res.Text)
@@ -357,7 +385,16 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 	case "/new":
 		m.client.NewSession(fmt.Sprintf("chat-%d", time.Now().UnixNano()))
 		m.client.Refresh()
+		m.rotateTranscript()
 		m.append(kindNotice, "new session "+short(m.client.Session)+" — the next message starts a fresh upstream conversation")
+		m.refreshViewport()
+		return m, nil
+	case "/transcript":
+		if m.rec == nil {
+			m.append(kindNotice, "transcript recording is off (-no-save)")
+		} else {
+			m.append(kindNotice, "transcript: "+m.rec.Path())
+		}
 		m.refreshViewport()
 		return m, nil
 	case "/help":
@@ -367,6 +404,7 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 			"/use <provider>  switch backend, e.g. /use deepseek  (also /use 8010 or /use <url>)",
 			"/new             new conversation on the current backend",
 			"/status          current backend, model, session, workspace",
+			"/transcript      where this session is being saved on disk",
 		}, "\n"))
 		m.refreshViewport()
 		return m, nil
@@ -411,10 +449,44 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 func (m *model) rewire() {
 	m.runner = spin.NewRunner(m.client, &spin.Executor{Root: m.root}, m.maxRounds)
 	m.runner.OnEvent = func(ev spin.Event) {
+		if m.rec != nil {
+			m.rec.Observe(ev) // transcript only; never feeds the loop
+		}
 		select {
 		case m.msgs <- eventMsg(ev):
 		default: // a slow terminal drops progress events, never the answer
 		}
+	}
+}
+
+// restore replays a saved transcript into the view. Display only: the loop is
+// untouched, so the next turn still sends just what the user types.
+func (m *model) restore(recs []spin.Record) {
+	shown := 0
+	for _, r := range recs {
+		switch r.Kind {
+		case "user":
+			m.append(kindUser, r.Text)
+			shown++
+		case "final":
+			m.append(kindAssistant, r.Text)
+			shown++
+		case "tool":
+			m.append(kindTool, "⚙ "+r.Name+" "+r.Arguments)
+		case "result":
+			m.append(kindResult, summarize(r.Result))
+		}
+	}
+	if shown > 0 {
+		m.append(kindNotice, fmt.Sprintf("restored %d message(s) from this session's transcript — shown for context, not sent to the model", shown))
+	}
+	m.refreshViewport()
+}
+
+// rotateTranscript starts a new transcript file after /new or /use.
+func (m *model) rotateTranscript() {
+	if m.rec != nil {
+		m.rec.Start(m.client.Session, m.client.Model, m.client.BaseURL, m.root)
 	}
 }
 
@@ -433,6 +505,7 @@ func (m *model) switchBackend(b backend) {
 	m.client = spin.NewClient(b.BaseURL, m.token, b.Model, fmt.Sprintf("chat-%d", time.Now().UnixNano()))
 	m.client.Refresh()
 	m.rewire()
+	m.rotateTranscript()
 	m.append(kindNotice, fmt.Sprintf("backend → %s · %s · model %s · session %s",
 		b.Provider, b.BaseURL, b.Model, short(m.client.Session)))
 	m.refreshViewport()
