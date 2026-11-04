@@ -57,18 +57,12 @@ func applyStealth(page *rod.Page) {
 		}
 	}`)
 
-	// Mask automation-related properties
-	_, _ = page.Eval(`() => {
-		// Remove automation indicators from window.navigator
-		const props = ['hardwareConcurrency', 'deviceMemory', 'maxTouchPoints'];
-		for (const prop of props) {
-			if (navigator[prop] !== undefined) {
-				Object.defineProperty(navigator, prop, {
-					get: () => navigator[prop],
-				});
-			}
-		}
-	}`)
+	// NOTE: hardwareConcurrency, deviceMemory and maxTouchPoints are deliberately
+	// left alone. They are ordinary browser properties, not automation
+	// indicators, so redefining them adds fingerprint surface instead of removing
+	// it. The block that used to live here also defined `get: () => navigator[prop]`,
+	// which recursed on itself and threw "Maximum call stack size exceeded" on
+	// every page — it broke chatgpt.com's login screen outright.
 
 	// Override permissions query
 	_, _ = page.Eval(`() => {

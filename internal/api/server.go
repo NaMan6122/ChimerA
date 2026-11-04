@@ -3,6 +3,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -43,6 +45,19 @@ type Server struct {
 	keys       *auth.Keys   // credential -> tenant registry
 	meter      *meter.Store // usage recording, nil when METER_DB=""
 	mu         sync.Mutex   // serializes browser access for single mode
+
+	// convSeen tracks what has already been sent upstream per conversation, so
+	// stateless clients that re-send growing history do not make the gateway
+	// repeat it into a conversation that already holds it.
+	convMu   sync.Mutex
+	convSeen map[string]*convTracker
+}
+
+// convTracker is the high-water mark for one upstream conversation.
+type convTracker struct {
+	thread string   // upstream thread id the provider keys its state on
+	fps    []string // per-message fingerprints, to prove an extension not a rewrite
+	count  int
 }
 
 // keysForConfig returns the parsed registry, building one from raw tokens
@@ -688,12 +703,34 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		threadID = sessionID // use sessionID as threadID for provider
 	}
 
-	// Pre-flight: message too long → fast 400 instead of 2m hang (upstream #17)
+	// A stateless client re-sends the whole history every turn. When the upstream
+	// conversation already holds that prefix, repeating it is pure duplication —
+	// the reason a 48k tool prompt grew by ~4k per turn. Only browserless
+	// transports keep server-side history, and a webapi->dom fallback must still
+	// receive the full prompt, so both are required.
+	tenant := s.tenantOf(r)
+	if sessionID == "" && !promptLimitApplies(provider) {
+		if _, isFallback := provider.(*providers.Fallback); !isFallback {
+			key, cont := s.isContinuation(tenant, providerName, req.Messages)
+			threadID = key
+			if cont {
+				if delta := buildDeltaPrompt(req.Messages); delta != "" && len(delta) < len(prompt) {
+					alog.Infof("Upstream conversation %s: %d-char delta instead of %d-char history", key, len(delta), len(prompt))
+					prompt = delta
+				}
+			}
+		}
+	}
+
+	// Pre-flight: message too long → fast 400 instead of 2m hang (upstream #17).
+	// The limit exists because a DOM send button disables itself at length, so a
+	// browserless transport — which has no button and posts the text to an API —
+	// is exempt. Harness prompts with tool schemas routinely exceed it.
 	maxChars := s.cfg.MaxPromptChars
 	if maxChars <= 0 {
 		maxChars = 12000
 	}
-	if len(prompt) > maxChars {
+	if len(prompt) > maxChars && promptLimitApplies(provider) {
 		alog.Warnf("Pre-flight reject: prompt %d chars exceeds %d", len(prompt), maxChars)
 		telemetry.ObserveChatRequest(providerName, req.Model, "400")
 		writeJSONError(w, http.StatusBadRequest, "message_too_long", fmt.Sprintf("Prompt exceeds %d chars, send button will be disabled. Split or shorten.", maxChars))
@@ -701,7 +738,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Monthly quota gate (after cheap validation, before browser work).
-	tenant := s.tenantOf(r)
 	if s.quotaExceeded(tenant) {
 		alog.Warnf("Quota exceeded for tenant %q", tenant)
 		telemetry.ObserveChatRequest(providerName, req.Model, "429")
@@ -818,7 +854,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if maxChars <= 0 {
 		maxChars = 12000
 	}
-	if len(prompt) > maxChars {
+	if len(prompt) > maxChars && promptLimitApplies(provider) {
 		alog.Warnf("Pre-flight reject: prompt %d chars exceeds %d", len(prompt), maxChars)
 		telemetry.ObserveChatRequest(providerName, req.Model, "400")
 		writeJSONError(w, http.StatusBadRequest, "message_too_long", fmt.Sprintf("Prompt exceeds %d chars, send button will be disabled. Split or shorten.", maxChars))
@@ -1130,6 +1166,108 @@ func buildPrompt(messages []models.ChatMessage, toolDefs []models.Tool, provider
 	return strings.Join(parts, "\n\n")
 }
 
+// conversationKey derives a stable key from a message list's opening: the system
+// messages plus the first user message. A client continuing the same
+// conversation keeps that prefix intact while its history grows.
+func conversationKey(tenant, providerName string, msgs []models.ChatMessage) string {
+	h := sha256.New()
+	for _, m := range msgs {
+		if m.Role == "system" {
+			fmt.Fprintf(h, "s:%s\n", m.UnmarshalContent())
+		}
+	}
+	for _, m := range msgs {
+		if m.Role == "user" {
+			fmt.Fprintf(h, "u:%s\n", m.UnmarshalContent())
+			break
+		}
+	}
+	return tenant + "|" + providerName + "|" + hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// messageFingerprints gives each message a cheap identity, so a continuation can
+// be distinguished from a different conversation that merely shares its opening.
+func messageFingerprints(msgs []models.ChatMessage) []string {
+	fps := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		sum := sha256.Sum256([]byte(m.Role + "\x00" + m.UnmarshalContent() + "\x00" + m.ToolCallID))
+		fps = append(fps, hex.EncodeToString(sum[:8]))
+	}
+	return fps
+}
+
+func hasFingerprintPrefix(fps, prefix []string) bool {
+	if len(fps) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if fps[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// isContinuation reports whether msgs extends a conversation already sent for
+// this key, and advances the high-water mark. A retried or rewritten history is
+// treated as a new conversation, never as a delta.
+func (s *Server) isContinuation(tenant, providerName string, msgs []models.ChatMessage) (string, bool) {
+	fps := messageFingerprints(msgs)
+	key := conversationKey(tenant, providerName, msgs)
+
+	s.convMu.Lock()
+	defer s.convMu.Unlock()
+	if s.convSeen == nil {
+		s.convSeen = map[string]*convTracker{}
+	}
+	if len(s.convSeen) > 1024 { // bound: conversation tracking is best-effort
+		s.convSeen = map[string]*convTracker{}
+	}
+	prev := s.convSeen[key]
+	if prev == nil {
+		s.convSeen[key] = &convTracker{thread: key, fps: fps, count: len(fps)}
+		return key, false
+	}
+	if len(fps) <= prev.count || !hasFingerprintPrefix(fps, prev.fps) {
+		// Retry or rewritten history: start a clean upstream thread. Reusing the
+		// old one would append the full prompt to a transcript that already
+		// holds it.
+		fresh := fmt.Sprintf("%s-%d", key, time.Now().UnixNano())
+		s.convSeen[key] = &convTracker{thread: fresh, fps: fps, count: len(fps)}
+		return fresh, false
+	}
+	prev.fps, prev.count = fps, len(fps)
+	return prev.thread, true
+}
+
+// buildDeltaPrompt renders only what the upstream conversation has not seen:
+// everything after the last assistant message. Tool results land here, which is
+// the point — the assistant's own tool-call JSON is already upstream.
+func buildDeltaPrompt(messages []models.ChatMessage) string {
+	start := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			start = i
+			break
+		}
+	}
+	tail := messages
+	if start >= 0 {
+		tail = messages[start+1:]
+	}
+	return strings.TrimSpace(buildPrompt(tail, nil, ""))
+}
+
+// promptLimitApplies reports whether the DOM send-button length guard applies to
+// this provider. Browserless transports replay an HTTP API, where the only real
+// limit is the upstream request size, not a disabled paste target.
+func promptLimitApplies(p providers.Provider) bool {
+	if b, ok := p.(providers.Browserless); ok && b.Browserless() {
+		return false
+	}
+	return true
+}
+
 // parseToolCallsIfPresent checks if the response contains tool calls.
 // Delegates to internal/tools, validating names against the requested defs so
 // hallucinated function names never reach the client.
@@ -1196,9 +1334,11 @@ func buildPrunedPrompt(messages []models.ChatMessage, toolDefs []models.Tool, pr
 	if len(pruned) == 0 {
 		pruned = []models.ChatMessage{messages[len(messages)-1]}
 	}
-	// Prepend system if present and first turn? For pruned we keep system only if first turn, else drop to avoid duplication.
-	// Keep system only if messages has system and pruned is first turn equivalent
-	return buildPrompt(pruned, toolDefs, provider)
+	// Tools are deliberately NOT re-injected on a follow-up turn. The upstream
+	// conversation already carries the tool block from turn 1, so re-sending it
+	// (40k+ chars of schemas in a harness spin) duplicates the largest part of the
+	// prompt and is what kept "pruned" turns at ~45k characters.
+	return buildPrompt(pruned, nil, provider)
 }
 
 // handleRefresh refreshes the provider tab (navigates to new chat).

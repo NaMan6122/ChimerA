@@ -18,15 +18,22 @@ import (
 )
 
 // ToolPromptForChatGPT is the system prompt injected for ChatGPT tool calling.
-const ToolPromptForChatGPT = `You are in tool-calling mode. You have access to the following functions:
+//
+// The second sentence is not decoration. Without an explicit "these are real and
+// available now", a chat model reading a tool block inside its own user turn
+// answers "I don't have access to that function" instead of emitting a call —
+// measured against a live ChatGPT session, which refused every tool request
+// until the wording was made assertive and the schemas were rendered as JSON.
+const ToolPromptForChatGPT = `You are operating through a tool bridge. You cannot read files, list directories or run commands directly; anything you need from the workspace is requested by emitting a JSON block, which the harness executes and returns to you as text.
 
 %s
 
-When you need to call a function, output ONLY a JSON code block with no commentary:
+To request one or more functions, output ONLY a JSON code block with no commentary:
 
 {"tool_calls": [{"name": "<function_name>", "arguments": {<key>: <value>}}]}
 
 Rules:
+- When the user asks about files, directories or commands, emit the JSON block instead of answering that you lack access
 - Output ONLY the JSON code block when calling tools
 - No text before or after the JSON when calling tools
 - When you receive tool results, summarize them naturally in plain text
@@ -49,10 +56,20 @@ Important guidelines:
 - You may invoke multiple tools in one response if needed`
 
 // BuildToolPrompt creates a prompt section describing available tools.
+//
+// Parameters are rendered as JSON Schema, not Go's %v: the map form produced
+// lines like `map[properties:map[path:map[description:...]]]`, which a model has
+// to reverse-engineer before it can build a correct arguments object.
 func BuildToolPrompt(tools []models.Tool, provider string) string {
 	var descriptions []string
 	for _, t := range tools {
-		desc := fmt.Sprintf("- %s: %s\n  Parameters: %v", t.Function.Name, t.Function.Description, t.Function.Parameters)
+		schema := "{}"
+		if t.Function.Parameters != nil {
+			if b, err := json.Marshal(t.Function.Parameters); err == nil {
+				schema = string(b)
+			}
+		}
+		desc := fmt.Sprintf("- %s: %s\n  Parameters (JSON Schema): %s", t.Function.Name, t.Function.Description, schema)
 		descriptions = append(descriptions, desc)
 	}
 

@@ -6,6 +6,13 @@ import (
 	"github.com/go-rod/rod"
 )
 
+// Browserless is implemented by transports that replay a provider's HTTP API
+// instead of driving a DOM. Limits that exist because a DOM send button disables
+// itself at length (MAX_PROMPT_CHARS) do not apply to them.
+type Browserless interface {
+	Browserless() bool
+}
+
 // Fallback routes chat turns to a secondary Provider when the primary fails
 // retryably (spec 011 §4). Both transports are initialized by the caller with
 // their own machinery (browser page vs HTTP session), so Init here is a no-op.
@@ -43,6 +50,15 @@ func NewFallback(primary, secondary Provider, retryable func(error) bool, reason
 
 func (f *Fallback) Name() string    { return f.Primary.Name() }
 func (f *Fallback) ModelID() string { return f.Primary.ModelID() }
+
+// Browserless reports the primary transport's shape: the prompt is length-checked
+// before the turn, so what decides is where it is about to be sent.
+func (f *Fallback) Browserless() bool {
+	if b, ok := f.Primary.(Browserless); ok {
+		return b.Browserless()
+	}
+	return false
+}
 
 // Init delegates to the primary; members must already be initialized.
 func (f *Fallback) Init(_ *rod.Page, cfg *config.Config) error {

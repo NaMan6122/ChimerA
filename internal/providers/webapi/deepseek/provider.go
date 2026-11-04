@@ -55,6 +55,10 @@ func (p *Provider) Name() string { return config.ProviderDeepSeek }
 // ModelID stays identical to the DOM transport so clients do not change.
 func (p *Provider) ModelID() string { return "chimera-deepseek" }
 
+// Browserless reports that this transport replays the web API, so the DOM
+// send-button length limit does not apply.
+func (p *Provider) Browserless() bool { return true }
+
 // Init loads the storage-state session. The rod.Page argument is unused (the
 // interface still carries it until spec 011's transport split lands).
 func (p *Provider) Init(_ *rod.Page, cfg *config.Config) error {
