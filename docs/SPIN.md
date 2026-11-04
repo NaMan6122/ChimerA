@@ -1,0 +1,88 @@
+# chimera-spin — the no-history harness
+
+`cmd/chimera-spin` is a small agent loop for driving a Chimera gateway. It exists
+because of one design rule:
+
+> **The harness must not accumulate context. The provider already keeps it.**
+
+Every consumer transport Chimera speaks to — ChatGPT, DeepSeek, Qwen — maintains
+the conversation upstream (`conversation_id` + parent message, or a session id).
+A general-purpose harness ignores that and re-sends its whole transcript every
+turn: measured at **47,861 chars on turn 1** and **51,936 on turn 2**, growing by
+the size of the history each round until it hits a vendor limit.
+
+`chimera-spin` sends:
+
+| Turn | What is sent | Measured |
+|---|---|---|
+| 1 | system prompt + task + tool schemas | ~1,100 chars |
+| 2..n | **only** the tool results from the previous round | 66 – 7,224 chars |
+| final | nothing new; the answer comes back | — |
+
+The gateway does the rest: `X-Session-Id` pins one upstream conversation, and
+`buildDeltaPrompt`/`buildPrunedPrompt` stop it repeating history the provider
+already holds. Because the harness never needs the transcript back, it also
+never parses or stores it — `s.rounds` holds latency and character counts only.
+
+## Usage
+
+```bash
+go build -o chimera-spin ./cmd/chimera-spin
+
+# a gateway must be running, e.g.
+TRANSPORT=webapi PROVIDER=chatgpt API_PORT=8000 ./chimera
+
+./chimera-spin "Where is MAX_PROMPT_CHARS enforced and which transports are exempt?"
+./chimera-spin -model chimera-deepseek -max-rounds 6 -json report.json "..."
+```
+
+Flags: `-base-url` (default `http://localhost:8000/v1`), `-token` (or
+`CHIMERA_API_KEY`), `-model`, `-session`, `-root` (workspace confinement),
+`-max-rounds`, `-timeout`, `-json`.
+
+A run prints the answer on stdout and a report on stderr:
+
+```
+[spin] rounds=3 tools=1 prompt_chars=9219 wall=19.4s session=spin-17938319
+[spin]   round 1: 1032 chars, 6.7s, tools=[grep]
+[spin]   round 2: 963 chars, 6.3s, tools=[grep read_file read_file]
+[spin]   round 3: 7224 chars, 6.3s, tools=[]
+```
+
+## Tools
+
+Six, not twenty — past a handful of schemas the prompt-injected calling
+convention degrades, and every schema is prompt bytes on the first turn.
+
+`read_file` · `list_dir` · `grep` · `write_file` · `edit_file` · `run_command`
+
+Paths are confined to `-root`; a model that can escape the workspace is a
+liability. `edit_file` requires the search text to occur exactly once. Tool
+failures are returned to the model as text rather than aborting the spin — a
+broken call is information it can use.
+
+Output budgets: 8,000 chars per call, 16,000 per round. Measured: eight parallel
+12k file reads produced a 65k-char follow-up prompt, which is the same
+accumulation arriving through the tool channel.
+
+## Protocol notes
+
+Tool schemas are declared **on the first turn only**. Later turns carry no
+`tools` field, so the gateway injects no schemas and the harness parses the
+model's JSON block itself (`parseToolCalls`). This requires the gateway to accept
+a request whose only messages are tool results — allowed when `X-Session-Id`
+identifies the conversation.
+
+The system prompt says the model "cannot read files directly" and must request
+through the bridge. That wording is load-bearing: told it merely "has access to
+functions", a live ChatGPT session answers that it cannot read files at all.
+
+## Known limits
+
+- If the upstream conversation is lost (session expiry, gateway restart), the
+  harness cannot resume — by design, it has no transcript to replay. Start a new
+  spin; the session id is fresh per run.
+- Tool calling remains prompt engineering: reliable for a few tools, not
+  arbitrary schemas. Cross-provider failover mid-spin is not implemented.
+- `run_command` executes in the workspace with the user's permissions. There is
+  no sandbox beyond path confinement for file tools.

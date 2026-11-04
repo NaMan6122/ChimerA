@@ -229,6 +229,10 @@ opencode, your own agent loop — keeps working.
 credits and escalate the hard reasoning steps through MCP `chat` — or let five
 subscriptions vote behind one tool call.
 
+**As its own harness:** [`chimera-spin`](docs/SPIN.md) drives the gateway with a
+six-tool loop that never stores a transcript — the provider already keeps the
+conversation, so each turn sends only what is new (~1k chars instead of ~48k).
+
 ---
 
 ## API

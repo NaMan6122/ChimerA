@@ -6,6 +6,9 @@ PKG=./...
 build:
 	go build -ldflags="-s -w" -o $(BINARY) ./cmd/chimera
 
+spin:
+	go build -ldflags="-s -w" -o chimera-spin ./cmd/chimera-spin
+
 run:
 	go run ./cmd/chimera
 

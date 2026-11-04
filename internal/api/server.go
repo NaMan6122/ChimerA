@@ -661,9 +661,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	alog.Infof("Chat completion request (model=%s, messages=%d, stream=%v)",
 		req.Model, len(req.Messages), req.Stream)
 
-	// Extract the last user message
+	// Extract the last user message. A follow-up turn may legitimately carry only
+	// tool results: when the client identifies its session, the upstream
+	// conversation already holds the user turn and the request contains nothing
+	// but what is new. Demanding a user message there forces a harness to resend
+	// history the provider already has.
+	sessionID := extractSessionID(r, req.User)
 	lastUserMsg := extractLastUserMessage(req.Messages)
-	if lastUserMsg == "" {
+	if lastUserMsg == "" && !(sessionID != "" && hasToolMessage(req.Messages)) {
 		telemetry.ObserveChatRequest("none", req.Model, "400")
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "no user message found")
 		return
@@ -689,7 +694,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	prompt := buildPrompt(req.Messages, req.Tools, promptProvider)
 
 	// Session continuity: X-Session-Id / X-Thread-Id header or req.User
-	sessionID := extractSessionID(r, req.User)
 	if sessionID != "" {
 		alog.Infof("Persistent session %s for provider %s (pruning history to avoid duplication)", sessionID, providerName)
 		// Prune to latest turn if not first turn (browser already has history)
@@ -1105,6 +1109,17 @@ func sendSSE(w http.ResponseWriter, data interface{}) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────
+
+// hasToolMessage reports whether the request carries tool results, which is what
+// makes a user-message-less follow-up meaningful rather than malformed.
+func hasToolMessage(messages []models.ChatMessage) bool {
+	for _, m := range messages {
+		if m.Role == "tool" {
+			return true
+		}
+	}
+	return false
+}
 
 // extractLastUserMessage gets the last user message content.
 func extractLastUserMessage(messages []models.ChatMessage) string {
