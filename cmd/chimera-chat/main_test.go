@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"fmt"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -64,6 +65,41 @@ func TestNewSessionResetsTurns(t *testing.T) {
 	_, _ = m.submit()
 	if m.client.Turns != 0 {
 		t.Fatalf("Turns = %d after /new, want 0", m.client.Turns)
+	}
+}
+
+// TestScrollBackDoesNotSnapToBottom is the scrollback contract: reading history
+// while the model is working must not be interrupted by new output.
+func TestScrollBackDoesNotSnapToBottom(t *testing.T) {
+	m := newTestModel()
+	m.viewport.Height = 5
+	m.viewport.Width = 80
+	for i := 0; i < 40; i++ {
+		m.append(kindAssistant, fmt.Sprintf("line %d", i))
+	}
+	m.refreshViewport()
+
+	m.scrollBy(-10)
+	if m.autoScroll {
+		t.Fatal("scrolling up should leave follow mode")
+	}
+	m.append(kindAssistant, "new output while reading history")
+	m.refreshViewport()
+	if m.viewport.AtBottom() {
+		t.Fatal("new output yanked the view back to the bottom")
+	}
+	if m.hiddenLines() <= 0 {
+		t.Fatalf("hidden lines = %d, want > 0", m.hiddenLines())
+	}
+
+	m.scrollToBottom()
+	if !m.autoScroll || !m.viewport.AtBottom() {
+		t.Fatal("end should resume following")
+	}
+	m.append(kindAssistant, "and now it follows")
+	m.refreshViewport()
+	if !m.viewport.AtBottom() {
+		t.Fatal("follow mode did not stick to the bottom")
 	}
 }
 

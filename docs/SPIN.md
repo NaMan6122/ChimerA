@@ -112,8 +112,41 @@ schemas, and every later message carries only what you typed (`Client.Turns`
 decides this). `/new` resets the upstream conversation and the next message
 starts it again.
 
-Keys: `enter` send · `ctrl+j` newline · `/new` fresh session · `/help` · `esc`
-quit.
+### Slash commands
+
+| Command | Effect |
+|---|---|
+| `/backends` | probe `localhost:8000-8011` and list every gateway with its provider and model |
+| `/use <provider>` | switch backend, e.g. `/use deepseek` — also `/use 8010` or `/use http://host:8011/v1` |
+| `/new` | new conversation on the current backend |
+| `/status` | backend, model, session, turn count, workspace |
+| `/help` | the list above |
+| `/quit` | exit (same as `esc`) |
+
+`/use` starts a fresh session on the new gateway, because the previous
+conversation lives in the old process. Discovery is a real probe, so a dead port
+is reported as dead rather than assumed absent:
+
+```
+→ chatgpt    http://localhost:8000/v1    chimera-chatgpt
+  —          http://localhost:8010/v1    no gateway
+```
+
+### Scrolling
+
+The transcript is a scrollback, not a tail: new output does not yank you back
+to the bottom while you are reading history.
+
+| Key | Effect |
+|---|---|
+| `pgup` / `pgdn` | page through the transcript (also the mouse wheel) |
+| `ctrl+u` / `ctrl+d` | half page |
+| `home` / `end` | jump to start / resume following |
+| `enter` | send (also jumps to the bottom) · `ctrl+j` newline |
+| `esc` | quit |
+
+While scrolled back the status line says how far: `↑ 42 lines below · end to follow`.
+Following resumes automatically when you scroll to the bottom.
 
 `chimera-chat` links a TUI toolkit (bubbletea); `chimera-spin` stays
 stdlib-only, and both share `internal/spin` for the protocol and tools.
