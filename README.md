@@ -313,7 +313,7 @@ Documented because they are measured, not because they are ignored.
    an in-stream event, now detected, but the limit is the vendor's to set.
 4. **Qwen's browserless completions are captcha-blocked** (`FAIL_SYS_USER_VALIDATE`,
    human-solved slider). Clearing it programmatically is captcha evasion,
-   which this project does not do (PRD §9). Workarounds: solve it once in the
+   which this project does not do (project policy). Workarounds: solve it once in the
    browser and re-export (`chimera auth login qwen`), use the DOM transport
    (~30 s/turn), or Qwen's official API.
 
