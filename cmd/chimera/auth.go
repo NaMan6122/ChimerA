@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,13 +14,17 @@ import (
 	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/providers/webapi"
 	_ "github.com/chimera/chimera/internal/providers/webapi/all"
+	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/proto"
 )
 
 const authUsage = `Usage: chimera auth <command> [flags]
 
 Commands:
   login    Open a browser, wait for you to log in, and store the session
+  verify   Open the browser so a one-time human check (captcha) can be cleared,
+           then re-export the session with the cookie it mints
   all      Log in to every provider in sequence (recommended)
   check    Verify every stored session against its provider
   import   Validate and install an exported session file
@@ -122,6 +128,8 @@ func runAuth(args []string) {
 	switch args[0] {
 	case "login":
 		authLogin(cfg, rest)
+	case "verify":
+		authVerify(cfg, rest)
 	case "all":
 		authLoginAll(cfg, rest)
 	case "check":
@@ -339,6 +347,150 @@ func printLoginInstructions(provider, url string, timeout time.Duration) {
 		fmt.Println("  Qwen stores its token in localStorage once the chat UI loads.")
 	}
 	fmt.Printf("\nWaiting for the session (up to %s)...\n", timeout)
+}
+
+// authVerify opens the provider's page for a one-time human verification and
+// then re-exports the session carrying the cookie it minted.
+//
+// Qwen's risk engine answers the completions endpoint with action=captcha until
+// the session holds an `x5sec` cookie, and that cookie only exists after a human
+// clears the slider in the browser. This command is the honest split: the human
+// does the verification, the tool carries the result. It never attempts to solve
+// the challenge itself.
+func authVerify(cfg *config.Config, args []string) {
+	fs := flag.NewFlagSet("auth verify", flag.ExitOnError)
+	timeout := fs.Duration("timeout", 10*time.Minute, "how long to wait for the verification cookie")
+	cdpURL := fs.String("cdp", "", "attach to a browser already running with --remote-debugging-port instead of launching one")
+	_ = fs.Parse(args)
+
+	spec, ok := authSpecs[cfg.Provider]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "auth verify supports %s only (got %q)\n", supportedAuthProviders(), cfg.Provider)
+		os.Exit(1)
+	}
+	if err := browserAvailable(); err != nil {
+		fmt.Fprintf(os.Stderr, "no Chromium available: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nOpening a Chromium window at %s\n\n", cfg.ProviderURL())
+	fmt.Println("  Send any message in the chat UI. If a slider or captcha appears,")
+	fmt.Println("  complete it once — this is the check that cannot be automated.")
+	fmt.Println("  The window closes by itself as soon as the verification cookie is set.")
+
+	var page *rod.Page
+	if *cdpURL != "" {
+		// Attach to a browser the caller launched (and can see). Needed where a
+		// child process launched by the gateway never reaches the window server.
+		wsURL := *cdpURL
+		if !strings.HasPrefix(wsURL, "ws") {
+			// Chrome exposes the debugger on a per-browser WebSocket path; the
+			// HTTP root is not a control URL.
+			resp, err := http.Get(strings.TrimRight(wsURL, "/") + "/json/version")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "probe %s: %v\n", wsURL, err)
+				os.Exit(1)
+			}
+			var info struct {
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&info)
+			resp.Body.Close()
+			if info.WebSocketDebuggerURL == "" {
+				fmt.Fprintf(os.Stderr, "%s did not report a debugger URL\n", wsURL)
+				os.Exit(1)
+			}
+			wsURL = info.WebSocketDebuggerURL
+		}
+		br := rod.New().ControlURL(wsURL)
+		if err := br.Connect(); err != nil {
+			fmt.Fprintf(os.Stderr, "attach to %s: %v\n", wsURL, err)
+			os.Exit(1)
+		}
+		defer br.Close()
+		pages, err := br.Pages()
+		if err != nil || len(pages) == 0 {
+			page, err = br.Page(proto.TargetCreateTarget{URL: cfg.ProviderURL()})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "open page:", err)
+				os.Exit(1)
+			}
+		} else {
+			page = pages[0]
+			_ = page.Navigate(cfg.ProviderURL())
+		}
+		fmt.Printf("attached to %s\n", *cdpURL)
+	} else {
+		mgr := browser.NewManager(cfg)
+		var err error
+		page, err = mgr.Launch()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "launch browser:", err)
+			os.Exit(1)
+		}
+		defer mgr.Close()
+	}
+
+	deadline := time.Now().Add(*timeout)
+	jar := map[string]string{}
+	verified := false
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		cookies, err := page.Cookies([]string{cfg.ProviderURL()})
+		if err != nil {
+			continue
+		}
+		jar = map[string]string{}
+		for _, c := range cookies {
+			if strings.Contains(c.Domain, spec.CookieHost) {
+				jar[c.Name] = c.Value
+			}
+		}
+		if jar["x5sec"] != "" {
+			verified = true
+			break
+		}
+	}
+	if !verified {
+		fmt.Fprintf(os.Stderr, "\nNo verification cookie after %s.\n", *timeout)
+		fmt.Fprintln(os.Stderr, "  If the slider never appeared, try sending a message again;")
+		fmt.Fprintln(os.Stderr, "  the challenge is issued per session, not per page load.")
+		os.Exit(1)
+	}
+
+	// Keep the stored token; replace the cookie jar with what the browser holds.
+	path := cfg.SessionPath(cfg.Provider)
+	sess, err := webapi.LoadSession(path)
+	if err != nil || sess.AccessToken == "" {
+		fmt.Fprintln(os.Stderr, "no stored token to pair with the verification; run `chimera auth login` first")
+		os.Exit(1)
+	}
+	sess.Cookies = jar
+	if err := webapi.WriteSession(sess, path); err != nil {
+		fmt.Fprintln(os.Stderr, "write session:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("\nVerification captured (%d cookies, including x5sec) -> %s\n", len(jar), path)
+
+	// Prove it end to end rather than declaring victory: the models endpoint
+	// passes without x5sec, only a real turn exercises the challenge.
+	ctor, ok := webapi.Lookup(cfg.Provider)
+	if !ok {
+		fmt.Println("  provider has no browserless transport; nothing further to check")
+		return
+	}
+	p := ctor(cfg)
+	if err := p.Init(nil, cfg); err != nil {
+		fmt.Printf("  session re-exported, but init failed: %v\n", err)
+		os.Exit(1)
+	}
+	resp, err := p.SendMessage("Reply with exactly: OK", fmt.Sprintf("verify-%d", time.Now().UnixNano()))
+	if err != nil {
+		fmt.Printf("  verification captured, but a browserless turn still fails:\n  %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("  browserless turn succeeded: %q\n", strings.TrimSpace(resp.Message))
+	fmt.Println("\nBrowserless transport is good to go.")
 }
 
 // authLoginAll logs in to every provider in sequence. It exists because the
