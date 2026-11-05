@@ -10,13 +10,12 @@ no API keys, no per-token bill, and no prompts leaving the machine it runs on.
 Go 1.25  ·  ~21 MB static binary  ·  MIT  ·  self-host free, managed single-tenant
 ```
 
-> **Product** — [PRD](docs/PRD.md) · [SaaS model](docs/SAAS.md) · [Website brief](docs/WEBSITE.md)
->
 > **Users** — [Install](#install) · [The native harness](#the-native-harness-context-lives-at-the-provider) · [API](docs/API.md) · [Harness internals](docs/SPIN.md)
 >
 > **Operators** — [Architecture](docs/ARCHITECTURE.md) · [Providers](docs/PROVIDERS.md) · [Observability](docs/OBSERVABILITY.md) · [Metering](docs/METERING.md) · [Distribution](docs/DISTRIBUTION.md)
 >
-> **Planned work** — [`specs/`](specs/): every transport and protocol lands as a numbered spec first.
+> **Internal** — engineering decisions, transport specs and product planning live in a
+> private repository (the `docs/internal` submodule). This repo stays product-facing.
 
 ---
 
@@ -214,7 +213,7 @@ opencode, your own agent loop — keeps working.
 - **Tool calling without a tool-calling API.** Signatures injected into the
   prompt, a brace-depth parser that survives code fences, unknown-name
   rejection, `call_<hex>` ids, results folded into the next turn. Reliable
-  for 1–7 tools; hardening in [spec 004](specs/004-tool-call-hardening.md).
+  for 1–7 tools; hardening tracked in an internal spec (004).
 - **Observable scraping, not hopeful scraping.** `/metrics` covers request
   outcomes, round-trip histograms, transport downgrades, and a
   selector-fallback radar that fires the moment a vendor changes their DOM.
@@ -224,7 +223,7 @@ opencode, your own agent loop — keeps working.
 - **Hardened where it hurts.** Multi-key auth, CORS, body caps, provider
   locks with timeouts, prompt-length guards, echo recovery.
 - **Agent-native.** As the model: swap the base URL. As a tool: escalate hard
-  reasoning steps through MCP `chat` ([spec 001](specs/001-mcp-stdio-mode.md)),
+  reasoning steps through MCP `chat` (internal spec 001),
   or let five subscriptions vote behind one call.
 
 ---
@@ -264,7 +263,7 @@ and a method, not an SLA — re-run the probe for your own.
 | Qwen | `chimera-qwen` | ✅ | ⚠️ captcha-blocked (below) | DOM works; tokens auto-refresh |
 | DeepSeek | `chimera-deepseek` | ✅ | ✅ `DeepSeekHashV1` PoW | chat + text-stability fallback |
 | Kimi | `chimera-kimi` | ✅ | — | chat + text-stability fallback |
-| Gemini | `chimera-gemini` | — | ✅ cookie custody, `SNlM0e` nonce, three-id continuation ([spec 013](specs/013-gemini-browserless.md)) | chat; model `auto` takes Google's default |
+| Gemini | `chimera-gemini` | — | ✅ cookie custody, `SNlM0e` nonce, three-id continuation (internal spec 013) | chat; model `auto` takes Google's default |
 
 Adding a provider: copy the `qwen/` DOM template, register it in `config` and
 `cmd/chimera/main.go`. A browserless transport implements
@@ -297,8 +296,7 @@ VNC URL, and someone else watching the selectors.
 Starter tiers, priced by substrate rather than per token — **Subscriber API
 $9–12/mo** (browserless, 10k requests), **Browser Solo $19/mo** (5k), **Team
 $79/mo** (auto transport with warm fallback, 50k), Scale custom. Unit
-economics: [`docs/SAAS.md`](docs/SAAS.md),
-[`ADR-002`](docs/ADR-002-browserless-tier-economics.md).
+economics: internal SaaS model + ADR-002 (private repo).
 
 ---
 

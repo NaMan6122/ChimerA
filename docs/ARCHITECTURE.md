@@ -203,7 +203,7 @@ Single replica per provider (browser is stateful, not horizontally scaled withou
 
 ## 8. Limitations (shared with Chimera)
 
-- Latency 10–20s per request (real browser round-trip); 3–8s on the browserless qwen transport (ADR-002).
+- Latency 10–20s per request (real browser round-trip); 3–8s on the browserless qwen transport (internal ADR-002).
 - Sessions expire days/weeks → re-login volume.
 - UI selectors brittle → centralize in `selectors.go`, monitor vendor DOM.
 - Tool calling via prompting reliable for 1-7 tools; complex schemas may need retry.
@@ -228,5 +228,5 @@ Single replica per provider (browser is stateful, not horizontally scaled withou
 
 ## 10. Why not keep Chimera's Python stack?
 
-See `docs/TECH_STACK_DECISION.md:1` for quantitative runtime comparison. TL;DR: Go static binary wins on footprint, startup, and concurrency; Python's Patchright+FastAPI is excellent for velocity but heavier and GIL-bound.
+The quantitative runtime comparison lives in the internal tech-stack decision record (private repo). TL;DR: Go static binary wins on footprint, startup, and concurrency; Python's Patchright+FastAPI is excellent for velocity but heavier and GIL-bound.
 

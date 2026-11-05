@@ -1,0 +1,3 @@
+[submodule "docs/internal"]
+	path = docs/internal
+	url = git@github.com:NaMan6122/chimera-internal.git
