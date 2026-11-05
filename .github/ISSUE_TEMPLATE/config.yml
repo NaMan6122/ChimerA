@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/NaMan6122/ChimerA/security/advisories/new
+    about: Credential leaks, auth bypasses, SSRF — private disclosure, never a public issue.
+  - name: Questions & usage help
+    url: https://github.com/NaMan6122/ChimerA/discussions
+    about: Prefer a discussion over an issue for setup questions.

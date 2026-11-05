@@ -1,0 +1,63 @@
+name: Bug report
+description: Something broke — a transport, an endpoint, a parse, a crash.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you paste anything:** `auth_data/*.json`, cookies, tokens and
+        prompts are credential-grade. Redact them. Logs and frame dumps must
+        be scrubbed.
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options: [chatgpt, claude, qwen, deepseek, kimi, gemini, grok, all/other]
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options: [webapi, dom, auto]
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+      description: Include the exact error (status code + body), redacted.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: |
+        Minimal steps — ideally one `curl` against the gateway or one
+        `chimera-spin` invocation.
+      placeholder: |
+        curl -H "Authorization: Bearer …" http://localhost:8000/v1/chat/completions …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: chimera -version
+      placeholder: chimera v0.1.1
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS / arch / network
+      placeholder: macOS 15 arm64, corporate network (TLS interception?)
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Hygiene
+      options:
+        - label: I redacted all session material and prompts from logs I am attaching
+          required: true
+        - label: I checked the Known issues section of the README
+          required: true

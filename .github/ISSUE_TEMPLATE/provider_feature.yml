@@ -1,0 +1,45 @@
+name: New provider / feature request
+description: Propose a provider, transport, or capability.
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What are you proposing?
+      options:
+        - "New provider (a vendor chat surface)"
+        - "New transport for an existing provider"
+        - "Protocol shape (Responses / Anthropic / MCP)"
+        - "Gateway capability (auth, metering, observability)"
+        - "Harness / TUI"
+        - "Other"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem it solves
+      description: What can you not do today?
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        **For a new provider**, the useful evidence is wire-level, not
+        aspirational: the endpoint(s), the auth material the web app uses,
+        how a follow-up turn carries conversation state, and what gates exist
+        (proof-of-work / signed headers are solvable in-process; **human
+        captchas are out of scope by policy** and proposals relying on them
+        will be declined). Reverse-engineering writeups you can link are
+        worth more than a vendor name.
+  - type: textarea
+    id: wire
+    attributes:
+      label: Wire evidence (for provider proposals)
+      placeholder: |
+        POST https://…/chat — body fields, auth cookies, streaming shape,
+        follow-up chaining, gates observed
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you use today
