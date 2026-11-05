@@ -97,7 +97,8 @@ cat > "$DIST/chimera.rb" <<EOF
 class Chimera < Formula
   desc "Your chat subscriptions as an OpenAI-compatible API"
   homepage "https://github.com/$REPO"
-  version "$VERNUM"
+  # No explicit version stanza: brew audit flags it as redundant because the
+  # version is scanned from the releases/download/v<ver>/ URL.
   license "MIT"
 
   livecheck do
