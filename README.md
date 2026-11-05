@@ -264,6 +264,7 @@ and a method, not an SLA — re-run the probe for your own.
 | DeepSeek | `chimera-deepseek` | ✅ | ✅ `DeepSeekHashV1` PoW | chat + text-stability fallback |
 | Kimi | `chimera-kimi` | ✅ | — | chat + text-stability fallback |
 | Gemini | `chimera-gemini` | — | ✅ cookie custody, `SNlM0e` nonce, three-id continuation (internal spec 013) | chat; model `auto` takes Google's default |
+| Grok | `chimera-grok` | — | ✅ live-verified (internal spec 014) | cookie custody; model side is stateless — the provider folds the transcript, so turns re-pay context |
 
 Adding a provider: copy the `qwen/` DOM template, register it in `config` and
 `cmd/chimera/main.go`. A browserless transport implements
