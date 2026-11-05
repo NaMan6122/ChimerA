@@ -264,7 +264,7 @@ and a method, not an SLA — re-run the probe for your own.
 | Qwen | `chimera-qwen` | ✅ | ⚠️ captcha-blocked (below) | DOM works; tokens auto-refresh |
 | DeepSeek | `chimera-deepseek` | ✅ | ✅ `DeepSeekHashV1` PoW | chat + text-stability fallback |
 | Kimi | `chimera-kimi` | ✅ | — | chat + text-stability fallback |
-| Gemini | `chimera-gemini` | — | ⚠️ new ([spec 013](specs/013-gemini-browserless.md)), needs live verify | cookie custody, `SNlM0e` nonce, three-id continuation |
+| Gemini | `chimera-gemini` | — | ✅ cookie custody, `SNlM0e` nonce, three-id continuation ([spec 013](specs/013-gemini-browserless.md)) | chat; model `auto` takes Google's default |
 
 Adding a provider: copy the `qwen/` DOM template, register it in `config` and
 `cmd/chimera/main.go`. A browserless transport implements
