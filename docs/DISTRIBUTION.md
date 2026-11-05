@@ -147,7 +147,7 @@ ruby -c dist/chimera.rb                             # formula syntax
 - The agent prompt in `--agent` must keep telling the agent NOT to run
   `chimera auth login`/`verify`: those open a real browser (and a GUI browser
   launched from an agent shell gets reaped), and captcha automation is
-  against PRD §9. If that split is ever wrong, the installer is advertising
+  against project policy. If that split is ever wrong, the installer is advertising
   something the product forbids.
 - `checksums.txt` lines are `<sha256>  <name>` with the name relative to the
   release root; both `dist.sh` (writer) and `install.sh` (verifier) and the
