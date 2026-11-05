@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # Go module security & minor updates — the pure-Go dependency posture is
+  # part of the release story (CGO_ENABLED=0 cross-compilation), so bumps
+  # get a build + test gate automatically.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+  # Keep the actions pinned to current majors (checkout, setup-go).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
