@@ -32,9 +32,13 @@ curl -fsSL https://raw.githubusercontent.com/NaMan6122/ChimerA/main/install.sh |
 CHIMERA_VERSION=v0.4.0 curl -fsSL .../install.sh | bash   # pin a release
 ```
 
-The installer detects OS/arch, resolves the latest GitHub release, downloads
-the tarball, verifies it against `checksums.txt` (refuses on mismatch), and
-installs the same layout as `./build.sh`:
+The installer is self-documenting: `install.sh --help` prints what it does
+plus the full manual transport setup (session export, gateway env, smoke
+tests); `install.sh --agent` prints a paste-able prompt for a coding agent
+that deliberately leaves only the browser login to the human. It detects
+OS/arch, resolves the latest GitHub release, downloads the tarball, verifies
+it against `checksums.txt` (refuses on mismatch), and installs the same
+layout as `./build.sh`:
 
 ```
 ~/.local/share/chimera/versions/v0.4.0/{chimera,chimera-spin,chimera-chat}
@@ -134,9 +138,15 @@ ruby -c dist/chimera.rb                             # formula syntax
 
 ## 6. Notes for agents touching this
 
-- `install.sh` is executed via `curl | bash`: **no positional arguments, env
-  vars only**; `set -euo pipefail`; no `jq`/`gh` dependency — only `curl`,
-  `awk`, `sed`, `tar`, `shasum`/`sha256sum`.
+- `install.sh` is executed via `curl | bash`: env vars plus two flags
+  (`--help`, `--agent`, passed as `bash -s -- --agent`); `set -euo pipefail`;
+  no `jq`/`gh` dependency — only `curl`, `awk`, `sed`, `tar`,
+  `shasum`/`sha256sum`.
+- The agent prompt in `--agent` must keep telling the agent NOT to run
+  `chimera auth login`/`verify`: those open a real browser (and a GUI browser
+  launched from an agent shell gets reaped), and captcha automation is
+  against PRD §9. If that split is ever wrong, the installer is advertising
+  something the product forbids.
 - `checksums.txt` lines are `<sha256>  <name>` with the name relative to the
   release root; both `dist.sh` (writer) and `install.sh` (verifier) and the
   formula (reader via `sha_for`) must agree on that shape.
