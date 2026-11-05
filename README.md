@@ -380,5 +380,5 @@ MIT. Inspired by [Chimera-Gateway](https://github.com/GautamVhavle/Chimera-Gatew
 ---
 
 <p align="center">
-  Made with ❤️ by <a href="https://github.com/NaMan6122/Anvaya-Cli">Anvaya</a>
+  Made with ❤️ by <a href="https://anvayahq.com">Anvaya</a>
 </p>
