@@ -263,16 +263,7 @@ case ":$PATH:" in
 esac
 
 say "installed chimera $VERSION ($("$PREFIX/bin/chimera" -version))"
-cat <<'EOS'
-
-Next steps — set up a transport (full guide: re-run with --help):
-
-    cd ~/chimera                            # any dir; auth_data/ + logs/ live here
-    chimera auth login chatgpt              # YOU run this: opens a real browser
-    TRANSPORT=webapi PROVIDER=chatgpt API_PORT=8000 API_TOKEN=chimera chimera
-    chimera-spin -base-url http://localhost:8000/v1 "Reply with OK"
-
-Let an agent do the rest: `install.sh --agent` prints a paste-able prompt
-(install, gateway lifecycle, health checks) that leaves only the browser
-login to you.
-EOS
+# The full guide prints on every install: curl|bash users never see a man
+# page, so the instructions travel with the action. --help prints the same
+# text on demand (or before deciding to install).
+guide_usage

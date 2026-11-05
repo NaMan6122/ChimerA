@@ -32,10 +32,11 @@ curl -fsSL https://raw.githubusercontent.com/NaMan6122/ChimerA/main/install.sh |
 CHIMERA_VERSION=v0.4.0 curl -fsSL .../install.sh | bash   # pin a release
 ```
 
-The installer is self-documenting: `install.sh --help` prints what it does
-plus the full manual transport setup (session export, gateway env, smoke
-tests); `install.sh --agent` prints a paste-able prompt for a coding agent
-that deliberately leaves only the browser login to the human. It detects
+The installer is self-documenting: it prints the full guide (what it does,
+manual transport setup, agent-driven setup) after every install and on
+`install.sh --help`; `install.sh --agent` prints a paste-able prompt for a
+coding agent that deliberately leaves only the browser login to the human.
+It detects
 OS/arch, resolves the latest GitHub release, downloads the tarball, verifies
 it against `checksums.txt` (refuses on mismatch), and installs the same
 layout as `./build.sh`:
@@ -54,6 +55,7 @@ environments).
 
 ```bash
 brew tap NaMan6122/chimera
+brew trust naman6122/chimera   # once per machine (Homebrew 4.6+)
 brew install chimera
 ```
 
