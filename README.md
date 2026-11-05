@@ -289,7 +289,7 @@ Everything is env or `.env`; see [`.env.example`](.env.example) for the annotate
 |---|---|---|---|---|
 | ChatGPT | `chimera-chatgpt` | ✅ | ✅ cookie custody, Sentinel PoW | chat + tools; re-export session when `/api/auth/session` reports `RefreshAccessTokenError` |
 | Claude | `chimera-claude` | ✅ | — | chat + tools, streaming via `data-is-streaming` |
-| Qwen | `chimera-qwen` | ✅ | ✅ signed requests | chat + text-stability fallback |
+| Qwen | `chimera-qwen` | ✅ | ⚠️ blocked (see below) | DOM works; browserless is WAF-rejected with Qwen's new short-lived token |
 | DeepSeek | `chimera-deepseek` | ✅ | ✅ `DeepSeekHashV1` PoW | chat + text-stability fallback |
 | Kimi | `chimera-kimi` | ✅ | — | chat + text-stability fallback |
 
@@ -362,6 +362,14 @@ Documented because they are measured, not because they are ignored.
 3. **DeepSeek rate-limits per account.** "Messages too frequent" arrives as an
    in-stream event rather than an HTTP error; it is now surfaced as one instead
    of a successful empty turn, but the limit itself is the vendor's to set.
+
+4. **Qwen's browserless transport is currently rejected by Alibaba's WAF.**
+   A fresh login (Nov 2026) yields a ~15-minute access token, a `refresh_token`
+   cookie and new anti-bot cookies (`_c_WBKFRo`, `_nb_ioWEgULi`), where the
+   transport expects the older ~30-day token. Replay answers
+   `FAIL_SYS_USER_VALIDATE RGV587_ERROR::SM`. The DOM transport is unaffected and
+   serves Qwen today (measured 30–36 s per turn, tool calls included); token
+   refresh is the fix, not yet implemented.
 
 Fixed since this section was written: `chimera auth status` used to report a
 Qwen token 18 days past its `exp` as healthy (the probe endpoint tolerates a
