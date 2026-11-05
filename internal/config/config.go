@@ -20,6 +20,7 @@ const (
 	ProviderQwen     = "qwen"
 	ProviderDeepSeek = "deepseek"
 	ProviderKimi     = "kimi"
+	ProviderGemini   = "gemini"
 	ProviderAll      = "all"
 )
 
@@ -30,6 +31,7 @@ var SupportedProviders = []string{
 	ProviderQwen,
 	ProviderDeepSeek,
 	ProviderKimi,
+	ProviderGemini,
 	ProviderAll,
 }
 
@@ -68,12 +70,19 @@ type Config struct {
 	DeepSeekWebThinking bool
 	ChatGPTWebModel     string
 
+	// WebAPI model selection for the gemini transport (spec 013): "auto"
+	// omits the model header (server default), names map to known hashes,
+	// anything else is used as a raw hash.
+	GeminiWebModel    string
+	GeminiWebThinking bool
+
 	// Provider URLs
 	ChatGPTURL  string
 	ClaudeURL   string
 	QwenURL     string
 	DeepSeekURL string
 	KimiURL     string
+	GeminiURL   string
 
 	// Timeouts
 	ResponseTimeout time.Duration
@@ -146,12 +155,16 @@ func Load() (*Config, error) {
 		DeepSeekWebThinking: getEnvBool("DEEPSEEK_WEB_THINKING", true),
 		ChatGPTWebModel:     getEnvStr("CHATGPT_WEB_MODEL", "auto"),
 
+		GeminiWebModel:    getEnvStr("GEMINI_WEB_MODEL", "auto"),
+		GeminiWebThinking: getEnvBool("GEMINI_WEB_THINKING", false),
+
 		// Provider URLs
 		ChatGPTURL:  getEnvStr("CHATGPT_URL", "https://chatgpt.com"),
 		ClaudeURL:   getEnvStr("CLAUDE_URL", "https://claude.ai"),
 		QwenURL:     getEnvStr("QWEN_URL", "https://chat.qwen.ai"),
 		DeepSeekURL: getEnvStr("DEEPSEEK_URL", "https://chat.deepseek.com"),
 		KimiURL:     getEnvStr("KIMI_URL", "https://www.kimi.com"),
+		GeminiURL:   getEnvStr("GEMINI_URL", "https://gemini.google.com"),
 
 		// Timeouts
 		ResponseTimeout: time.Duration(getEnvInt("RESPONSE_TIMEOUT", 120000)) * time.Millisecond,
@@ -249,6 +262,8 @@ func (c *Config) ProviderURL() string {
 		return c.DeepSeekURL
 	case ProviderKimi:
 		return c.KimiURL
+	case ProviderGemini:
+		return c.GeminiURL
 	default:
 		return c.ChatGPTURL
 	}
@@ -262,6 +277,7 @@ func (c *Config) ProviderURLs() map[string]string {
 		ProviderQwen:     c.QwenURL,
 		ProviderDeepSeek: c.DeepSeekURL,
 		ProviderKimi:     c.KimiURL,
+		ProviderGemini:   c.GeminiURL,
 	}
 }
 
@@ -289,6 +305,7 @@ var webAPIProviders = map[string]bool{
 	ProviderQwen:     true,
 	ProviderDeepSeek: true,
 	ProviderChatGPT:  true,
+	ProviderGemini:   true,
 }
 
 // UseWebAPI reports whether the browserless transport should be used for the

@@ -30,7 +30,7 @@ Commands:
   import   Validate and install an exported session file
   status   Show the stored session's validity and expiry
 
-Providers: qwen, deepseek, chatgpt.
+Providers: qwen, deepseek, chatgpt, gemini.
   Select one with PROVIDER=<name> or pass it as the first argument:
       chimera auth login chatgpt
       chimera auth login --provider deepseek
@@ -100,6 +100,16 @@ var authSpecs = map[string]authSpec{
 		CookiePrefix: true,
 		CookieHost:   "chatgpt",
 		Marker:       "cookie-session",
+	},
+	config.ProviderGemini: {
+		// Cookie custody: __Secure-1PSID is the session and __Secure-1PSIDTS
+		// (host .google.com, swept by the CookieHost filter) is its rotating
+		// companion; without the pair Google silently downgrades requests to
+		// anonymous. SAPISID, also swept, feeds the SAPISIDHASH header.
+		// Spec 013 §1. The presence of SNlM0e on /app later proves the jar.
+		CookieName: "__Secure-1PSID",
+		CookieHost: "google",
+		Marker:     "cookie-session",
 	},
 }
 

@@ -3,8 +3,8 @@
 **Your chat subscriptions, as an OpenAI-compatible API.**
 
 Point any OpenAI SDK, LangChain chain, or agent harness at Chimera and your
-ChatGPT / Qwen / DeepSeek / Claude / Kimi login answers over `/v1` — no API
-keys, no per-token bill, and no prompts leaving the machine it runs on.
+ChatGPT / Qwen / DeepSeek / Claude / Kimi / Gemini login answers over `/v1` —
+no API keys, no per-token bill, and no prompts leaving the machine it runs on.
 
 ```
 Go 1.25  ·  ~21 MB static binary  ·  MIT  ·  self-host free, managed single-tenant
@@ -33,7 +33,7 @@ metrics, and no story for more than one user.
 Chimera is the other version of that:
 
 - **Zero token spend.** The subscription you already pay for becomes the backend.
-- **Models without APIs.** One OpenAI shape in front of five consumer surfaces.
+- **Models without APIs.** One OpenAI shape in front of six consumer surfaces.
 - **Private by construction.** Prompts stay in your profile/session, not our cloud.
 - **Operable as a product.** Quotas, usage ledgers, login health, and a
   selector-fallback radar that turns vendor UI drift into an alert instead of a mystery 500.
@@ -264,6 +264,7 @@ and a method, not an SLA — re-run the probe for your own.
 | Qwen | `chimera-qwen` | ✅ | ⚠️ captcha-blocked (below) | DOM works; tokens auto-refresh |
 | DeepSeek | `chimera-deepseek` | ✅ | ✅ `DeepSeekHashV1` PoW | chat + text-stability fallback |
 | Kimi | `chimera-kimi` | ✅ | — | chat + text-stability fallback |
+| Gemini | `chimera-gemini` | — | ⚠️ new ([spec 013](specs/013-gemini-browserless.md)), needs live verify | cookie custody, `SNlM0e` nonce, three-id continuation |
 
 Adding a provider: copy the `qwen/` DOM template, register it in `config` and
 `cmd/chimera/main.go`. A browserless transport implements
