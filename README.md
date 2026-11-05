@@ -376,3 +376,9 @@ Not affiliated with any vendor. One tenant, one account, one login.
 ## License
 
 MIT. Inspired by [Chimera-Gateway](https://github.com/GautamVhavle/Chimera-Gateway) (MIT).
+
+---
+
+<p align="center">
+  Made with ❤️ by <a href="https://github.com/NaMan6122/Anvaya-Cli">Anvaya</a>
+</p>
