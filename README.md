@@ -375,7 +375,7 @@ Not affiliated with any vendor. One tenant, one account, one login.
 
 ## License
 
-MIT. Inspired by [Chimera-Gateway](https://github.com/GautamVhavle/Chimera-Gateway) (MIT).
+MIT.
 
 ---
 
