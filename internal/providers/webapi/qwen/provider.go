@@ -1,6 +1,7 @@
 package qwenweb
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -23,10 +24,11 @@ func init() {
 // browser. It is selected when TRANSPORT=webapi, or TRANSPORT=auto with an
 // exported session (spec 011).
 type Provider struct {
-	cfg    *config.Config
-	client *Client
-	sess   *Session
-	log    *logging.Logger
+	cfg         *config.Config
+	client      *Client
+	sess        *Session
+	sessionPath string
+	log         *logging.Logger
 
 	mu    sync.Mutex
 	convs map[string]convState
@@ -65,13 +67,64 @@ func (p *Provider) Init(_ *rod.Page, cfg *config.Config) error {
 	}
 	timeout := cfg.ResponseTimeout + 30*time.Second
 	p.sess = sess
+	p.sessionPath = cfg.QwenSessionPath()
 	p.client = NewClient(sess, timeout)
+
+	// Access tokens live ~15 minutes now; the refresh_token cookie lives ~30
+	// days. Refresh up front so a long-idle gateway starts with a live token
+	// instead of failing its first turn.
+	if err := p.refreshSession(); err != nil {
+		p.log.Warnf("qwen token refresh failed (%v); trying the stored token", err)
+	}
+
 	if ok, err := p.IsLoggedIn(); err != nil {
 		return fmt.Errorf("qwen web session check: %w", err)
 	} else if !ok {
-		return fmt.Errorf("qwen web session rejected (re-export %s)", cfg.QwenSessionPath())
+		return fmt.Errorf("qwen web session rejected (re-export %s)", p.sessionPath)
 	}
 	return nil
+}
+
+// refreshSession mints a new access token from the refresh_token cookie and
+// persists both, so a restart does not need another round trip.
+func (p *Provider) refreshSession() error {
+	res, err := p.client.RefreshAccessToken()
+	if err != nil {
+		return err
+	}
+	p.client.SetToken(res.AccessToken)
+	if p.sess == nil {
+		return nil
+	}
+	p.sess.AccessToken = res.AccessToken
+	if res.RefreshToken != "" {
+		if p.sess.Cookies == nil {
+			p.sess.Cookies = map[string]string{}
+		}
+		p.sess.Cookies["refresh_token"] = res.RefreshToken
+	}
+	if p.sessionPath != "" {
+		if err := webapi.WriteSession(p.sess, p.sessionPath); err != nil {
+			p.log.Warnf("qwen session refresh could not be saved: %v", err)
+		}
+	}
+	p.log.Infof("qwen access token refreshed (valid ~15m)")
+	return nil
+}
+
+// needsRefresh reports failures that a fresh token can plausibly fix.
+func needsRefresh(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, webapi.ErrWAF) || errors.Is(err, webapi.ErrSessionExpired) {
+		return true
+	}
+	var he *webapi.HTTPError
+	if errors.As(err, &he) && (he.Status == 401 || he.Status == 403) {
+		return true
+	}
+	return false
 }
 
 // SendMessage performs one turn. A stable threadID reuses its conversation;
@@ -92,6 +145,15 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 	}
 
 	res, err := p.client.Send(p.cfg.QwenWebModel, conv.chatID, conv.parentID, text, p.cfg.QwenWebThinking)
+
+	// A rejected token looks like a WAF block from here. Refresh once and retry
+	// the same turn before giving up: the access token only lives ~15 minutes.
+	if needsRefresh(err) {
+		p.log.Warnf("qwen turn rejected (%v); refreshing token and retrying", err)
+		if rerr := p.refreshSession(); rerr == nil {
+			res, err = p.client.Send(p.cfg.QwenWebModel, conv.chatID, conv.parentID, text, p.cfg.QwenWebThinking)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

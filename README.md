@@ -363,13 +363,21 @@ Documented because they are measured, not because they are ignored.
    in-stream event rather than an HTTP error; it is now surfaced as one instead
    of a successful empty turn, but the limit itself is the vendor's to set.
 
-4. **Qwen's browserless transport is currently rejected by Alibaba's WAF.**
-   A fresh login (Nov 2026) yields a ~15-minute access token, a `refresh_token`
-   cookie and new anti-bot cookies (`_c_WBKFRo`, `_nb_ioWEgULi`), where the
-   transport expects the older ~30-day token. Replay answers
-   `FAIL_SYS_USER_VALIDATE RGV587_ERROR::SM`. The DOM transport is unaffected and
-   serves Qwen today (measured 30–36 s per turn, tool calls included); token
-   refresh is the fix, not yet implemented.
+4. **Qwen's browserless transport is blocked by a captcha on the completions
+   endpoint.** Qwen now issues ~15-minute access tokens (refreshed from a
+   `refresh_token` cookie against `auth.qwen.ai`), which the transport now
+   handles automatically. After that fix the block narrowed to exactly one
+   request: `POST /api/v2/chat/completions` answers `FAIL_SYS_USER_VALIDATE`
+   with `action=captcha` and an `x5secdata` challenge, while `chats/new`,
+   `models` and the token refresh all succeed. Reproduced identically from Go,
+   Python and curl, so it is the session's risk state, not the HTTP client.
+
+   The `x5sec` cookie that clears it is only minted after a human solves the
+   slider in the browser. Solving that programmatically is captcha evasion,
+   which this project does not do (PRD §9). Workarounds that stay inside the
+   rules: complete the captcha once in the browser and re-export the session
+   (`chimera auth login qwen` without `-fresh`), use the DOM transport (measured
+   30–36 s per turn, tool calls included), or use Qwen's official API.
 
 Fixed since this section was written: `chimera auth status` used to report a
 Qwen token 18 days past its `exp` as healthy (the probe endpoint tolerates a

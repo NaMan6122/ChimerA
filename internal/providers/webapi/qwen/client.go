@@ -3,10 +3,12 @@ package qwenweb
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -20,8 +22,8 @@ import (
 const BaseURL = "https://chat.qwen.ai"
 
 const (
-	clientVersion = "0.2.84"
-	userAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+	clientVersion = "0.4.4"
+	userAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 )
 
 // The session type and the retry/fallback error vocabulary are shared with every
@@ -40,6 +42,8 @@ var ErrWAF = webapi.ErrWAF
 // Client is a low-level chat.qwen.ai web API client.
 type Client struct {
 	BaseURL string
+	// AuthURL is the token service; Qwen moved refresh off the chat host.
+	AuthURL string
 	// WuURL is the bx-umidtoken endpoint; empty skips the fetch (tests).
 	WuURL   string
 	http    *http.Client
@@ -50,15 +54,103 @@ type Client struct {
 	mid string
 }
 
+// RefreshResult is what the token service returns.
+type RefreshResult struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	Email        string `json:"email"`
+}
+
 // NewClient builds a client from storage-state material.
 func NewClient(s *Session, timeout time.Duration) *Client {
+	// HTTP/1.1 only. Measured: the same request succeeds over HTTP/1.1 and is
+	// answered with FAIL_SYS_USER_VALIDATE over HTTP/2 — the risk engine scores
+	// the connection too, and Go's h2 fingerprint is not a browser's.
+	tr := &http.Transport{
+		Proxy:             http.ProxyFromEnvironment,
+		ForceAttemptHTTP2: false,
+		TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
+		MaxIdleConns:      8,
+		IdleConnTimeout:   90 * time.Second,
+	}
 	return &Client{
 		BaseURL: BaseURL,
+		AuthURL: "https://auth.qwen.ai",
 		WuURL:   "https://sg-wum.alibaba.com/w/wu.json",
-		http:    &http.Client{Timeout: timeout},
+		http:    &http.Client{Timeout: timeout, Transport: tr},
 		token:   s.AccessToken,
 		cookies: s.Cookies,
 	}
+}
+
+// RefreshAccessToken exchanges the refresh_token cookie for a new access token.
+//
+// Qwen moved to ~15-minute access tokens in Nov 2026 and mints them against
+// auth.qwen.ai, not the chat host. The browser does exactly this call; replaying
+// it is session maintenance, not a challenge bypass. Headers mirror what the app
+// sends — the service rejects the request without source/version/x-request-origin.
+func (c *Client) RefreshAccessToken() (*RefreshResult, error) {
+	if c.AuthURL == "" {
+		return nil, fmt.Errorf("no auth endpoint configured")
+	}
+	if c.cookies["refresh_token"] == "" {
+		return nil, fmt.Errorf("session has no refresh_token cookie; re-export it with `chimera auth login qwen`")
+	}
+
+	names := make([]string, 0, len(c.cookies))
+	for k := range c.cookies {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, k := range names {
+		parts = append(parts, k+"="+c.cookies[k])
+	}
+
+	req, err := http.NewRequest("GET", c.AuthURL+"/api/v2/auths/refresh", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Origin", "https://chat.qwen.ai")
+	req.Header.Set("Referer", "https://chat.qwen.ai/")
+	req.Header.Set("source", "web")
+	req.Header.Set("version", clientVersion)
+	req.Header.Set("x-request-origin", "https://chat.qwen.ai")
+	req.Header.Set("X-Request-Id", uuid4())
+	req.Header.Set("Timezone", time.Now().Format("Mon Jan 02 2006 15:04:05 GMT-0700"))
+	req.Header.Set("Cookie", strings.Join(parts, "; "))
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != 200 {
+		return nil, &HTTPError{Status: resp.StatusCode, Body: snippet(raw)}
+	}
+
+	var doc struct {
+		Success bool          `json:"success"`
+		Data    RefreshResult `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("refresh: non-JSON (%s): %s", resp.Header.Get("Content-Type"), snippet(raw))
+	}
+	if !doc.Success || doc.Data.AccessToken == "" {
+		return nil, fmt.Errorf("refresh rejected: %s", snippet(raw))
+	}
+	return &doc.Data, nil
+}
+
+// SetToken replaces the bearer used for subsequent requests.
+func (c *Client) SetToken(t string) {
+	c.mu.Lock()
+	c.token = t
+	c.mu.Unlock()
 }
 
 var midRe = regexp.MustCompile(`(?:umx\.wu|__fycb)\('([^']+)'\)`)
@@ -102,40 +194,74 @@ func (c *Client) headers(fp string) http.Header {
 	h := http.Header{}
 	h.Set("User-Agent", userAgent)
 	h.Set("Accept", "*/*")
-	h.Set("Accept-Language", "en-US,en;q=0.5")
 	h.Set("Origin", c.BaseURL)
 	h.Set("Referer", c.BaseURL+"/")
 	h.Set("Content-Type", "application/json")
-	h.Set("Sec-Fetch-Dest", "empty")
-	h.Set("Sec-Fetch-Mode", "cors")
-	h.Set("Sec-Fetch-Site", "same-origin")
-	h.Set("Connection", "keep-alive")
-	h.Set("X-Requested-With", "XMLHttpRequest")
 	h.Set("source", "web")
 	h.Set("version", clientVersion)
-	h.Set("X-Accel-Buffering", "no")
-	h.Set("Cookie", strings.Join(parts, "; "))
-	h.Set("bx-ua", generateBXUA(fp))
-	h.Set("bx-v", "2.5.37")
 	h.Set("x-request-id", uuid4())
+	h.Set("Cookie", strings.Join(parts, "; "))
+
+	// The synthetic anti-bot fingerprint (bx-ua / bx-v / bx-umidtoken plus
+	// X-Requested-With and Sec-Fetch-*) is OFF by default.
+	//
+	// Measured Nov 2026: POST /api/v2/chats/new answers FAIL_SYS_USER_VALIDATE
+	// RGV587_ERROR when those headers are present, and 200 with a chat id when
+	// the request carries only the session's own cookies and a fresh token.
+	// The generated fingerprint is what the risk engine objects to — it is
+	// self-consistent but was never issued by a browser.
+	//
+	// QWEN_BXUA=1 restores the old header set if Qwen's engine changes again.
+	if bxuaHeadersEnabled() {
+		h.Set("Sec-Fetch-Dest", "empty")
+		h.Set("Sec-Fetch-Mode", "cors")
+		h.Set("Sec-Fetch-Site", "same-origin")
+		h.Set("Connection", "keep-alive")
+		h.Set("X-Requested-With", "XMLHttpRequest")
+		h.Set("X-Accel-Buffering", "no")
+		h.Set("bx-ua", generateBXUA(fp))
+		h.Set("bx-v", "2.5.37")
+	}
 
 	c.mu.Lock()
-	mid := c.mid
+	mid, token := c.mid, c.token
 	c.mu.Unlock()
-	if mid != "" {
+	if bxuaHeadersEnabled() && mid != "" {
 		h.Set("bx-umidtoken", mid)
 	}
-	if c.token != "" {
-		h.Set("Authorization", "Bearer "+c.token)
+	if token != "" {
+		h.Set("Authorization", "Bearer "+token)
 	}
 	return h
 }
 
+// bxuaHeadersEnabled reports whether the synthetic fingerprint is sent.
+func bxuaHeadersEnabled() bool { return os.Getenv("QWEN_BXUA") == "1" }
+
 func (c *Client) do(req *http.Request) (*http.Response, error) {
-	if err := c.fetchMidtoken(); err != nil {
-		return nil, fmt.Errorf("midtoken: %w", err)
+	if bxuaHeadersEnabled() {
+		if err := c.fetchMidtoken(); err != nil {
+			return nil, fmt.Errorf("midtoken: %w", err)
+		}
 	}
 	req.Header = c.headers(generateFingerprint())
+
+	// QWEN_HTTP_DUMP=<path> records what we actually sent, header by header.
+	// The risk engine answers differently to near-identical requests, so when a
+	// turn is refused the only useful evidence is the exact request.
+	if path := os.Getenv("QWEN_HTTP_DUMP"); path != "" {
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			fmt.Fprintf(f, ">>> %s %s\n", req.Method, req.URL)
+			for k, v := range req.Header {
+				if k == "Cookie" || k == "Authorization" {
+					fmt.Fprintf(f, "    %s: <redacted>\n", k)
+					continue
+				}
+				fmt.Fprintf(f, "    %s: %s\n", k, strings.Join(v, ","))
+			}
+			f.Close()
+		}
+	}
 	return c.http.Do(req)
 }
 
