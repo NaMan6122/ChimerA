@@ -21,6 +21,7 @@ const (
 	ProviderDeepSeek = "deepseek"
 	ProviderKimi     = "kimi"
 	ProviderGemini   = "gemini"
+	ProviderGrok     = "grok"
 	ProviderAll      = "all"
 )
 
@@ -32,6 +33,7 @@ var SupportedProviders = []string{
 	ProviderDeepSeek,
 	ProviderKimi,
 	ProviderGemini,
+	ProviderGrok,
 	ProviderAll,
 }
 
@@ -76,6 +78,9 @@ type Config struct {
 	GeminiWebModel    string
 	GeminiWebThinking bool
 
+	// WebAPI model selection for the grok transport (spec 014, internal).
+	GrokWebModel string
+
 	// Provider URLs
 	ChatGPTURL  string
 	ClaudeURL   string
@@ -83,6 +88,7 @@ type Config struct {
 	DeepSeekURL string
 	KimiURL     string
 	GeminiURL   string
+	GrokURL     string
 
 	// Timeouts
 	ResponseTimeout time.Duration
@@ -158,6 +164,8 @@ func Load() (*Config, error) {
 		GeminiWebModel:    getEnvStr("GEMINI_WEB_MODEL", "auto"),
 		GeminiWebThinking: getEnvBool("GEMINI_WEB_THINKING", false),
 
+		GrokWebModel: getEnvStr("GROK_WEB_MODEL", "auto"),
+
 		// Provider URLs
 		ChatGPTURL:  getEnvStr("CHATGPT_URL", "https://chatgpt.com"),
 		ClaudeURL:   getEnvStr("CLAUDE_URL", "https://claude.ai"),
@@ -165,6 +173,7 @@ func Load() (*Config, error) {
 		DeepSeekURL: getEnvStr("DEEPSEEK_URL", "https://chat.deepseek.com"),
 		KimiURL:     getEnvStr("KIMI_URL", "https://www.kimi.com"),
 		GeminiURL:   getEnvStr("GEMINI_URL", "https://gemini.google.com"),
+		GrokURL:     getEnvStr("GROK_URL", "https://grok.com"),
 
 		// Timeouts
 		ResponseTimeout: time.Duration(getEnvInt("RESPONSE_TIMEOUT", 120000)) * time.Millisecond,
@@ -264,6 +273,8 @@ func (c *Config) ProviderURL() string {
 		return c.KimiURL
 	case ProviderGemini:
 		return c.GeminiURL
+	case ProviderGrok:
+		return c.GrokURL
 	default:
 		return c.ChatGPTURL
 	}
@@ -278,6 +289,7 @@ func (c *Config) ProviderURLs() map[string]string {
 		ProviderDeepSeek: c.DeepSeekURL,
 		ProviderKimi:     c.KimiURL,
 		ProviderGemini:   c.GeminiURL,
+		ProviderGrok:     c.GrokURL,
 	}
 }
 
@@ -306,6 +318,7 @@ var webAPIProviders = map[string]bool{
 	ProviderDeepSeek: true,
 	ProviderChatGPT:  true,
 	ProviderGemini:   true,
+	ProviderGrok:     true,
 }
 
 // UseWebAPI reports whether the browserless transport should be used for the

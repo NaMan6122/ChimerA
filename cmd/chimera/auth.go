@@ -30,7 +30,7 @@ Commands:
   import   Validate and install an exported session file
   status   Show the stored session's validity and expiry
 
-Providers: qwen, deepseek, chatgpt, gemini.
+Providers: qwen, deepseek, chatgpt, gemini, grok.
   Select one with PROVIDER=<name> or pass it as the first argument:
       chimera auth login chatgpt
       chimera auth login --provider deepseek
@@ -109,6 +109,15 @@ var authSpecs = map[string]authSpec{
 		// Spec 013 §1. The presence of SNlM0e on /app later proves the jar.
 		CookieName: "__Secure-1PSID",
 		CookieHost: "google",
+		Marker:     "cookie-session",
+	},
+	config.ProviderGrok: {
+		// Cookie custody (internal spec 014): the sso JWT is the session. The
+		// server-set anti-bot cookies (x-anonuserid, x-challenge, x-signature)
+		// and Cloudflare's cf_clearance/__cf_bm must come from the same browser
+		// session, so the whole grok.com jar travels together.
+		CookieName: "sso",
+		CookieHost: "grok",
 		Marker:     "cookie-session",
 	},
 }
