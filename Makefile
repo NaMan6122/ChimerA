@@ -1,4 +1,4 @@
-.PHONY: build run vet test clean docker
+.PHONY: build run vet test dist clean docker
 
 BINARY=chimera
 PKG=./...
@@ -30,6 +30,11 @@ docker-logs:
 
 install-rod:
 	go run github.com/go-rod/rod/lib/launcher@latest
+
+# Cross-compile release artifacts into dist/ (tarballs, checksums, brew formula).
+# CI runs the same script on a v* tag; see docs/DISTRIBUTION.md.
+dist:
+	./scripts/dist.sh
 
 help:
 	@echo "Targets: build run vet test clean docker docker-logs"

@@ -17,11 +17,34 @@ Go 1.25  ·  ~21 MB static binary  ·  MIT  ·  self-host free, managed single-t
 
 > **Product** — [PRD](docs/PRD.md) · [SaaS model](docs/SAAS.md) · [Website brief](docs/WEBSITE.md)
 >
-> **Operators** — [API](docs/API.md) · [Architecture](docs/ARCHITECTURE.md) · [Providers](docs/PROVIDERS.md) · [Observability](docs/OBSERVABILITY.md) · [Metering](docs/METERING.md)
+> **Operators** — [API](docs/API.md) · [Architecture](docs/ARCHITECTURE.md) · [Providers](docs/PROVIDERS.md) · [Observability](docs/OBSERVABILITY.md) · [Metering](docs/METERING.md) · [Distribution](docs/DISTRIBUTION.md)
 >
 > **Planned work** — [`specs/`](specs/): every transport and protocol lands as a numbered spec first.
 >
 > **Picking this up?** — [`docs/HANDOFF.md`](docs/HANDOFF.md): current state, invariants, open work.
+
+---
+
+## Install
+
+Prebuilt binaries, three per archive (`chimera` gateway, `chimera-spin`
+harness, `chimera-chat` TUI) — macOS and Linux, amd64 and arm64:
+
+```bash
+# curl — installs to ~/.local/bin, sha256-verified against the release
+curl -fsSL https://raw.githubusercontent.com/NaMan6122/ChimerA/main/install.sh | bash
+
+# Homebrew
+brew tap NaMan6122/chimera
+brew install chimera
+
+# from source — same install layout as the installer
+git clone https://github.com/NaMan6122/ChimerA.git && cd ChimerA && ./build.sh
+```
+
+Releases are cut by pushing a `v*` tag; GitHub Actions cross-compiles every
+platform, publishes the archives with checksums and a generated Homebrew
+formula. The runbook and the tap setup live in [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md).
 
 ---
 

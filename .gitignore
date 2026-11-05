@@ -10,6 +10,7 @@ tenants/
 !.gitkeep
 .DS_Store
 bin/
+dist/
 last_copied_card.txt
 # Root build artifact only: a bare "chimera-spin" would also ignore the
 # cmd/chimera-spin source directory.
