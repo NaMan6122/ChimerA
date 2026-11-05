@@ -17,8 +17,6 @@ Go 1.25  ·  ~21 MB static binary  ·  MIT  ·  self-host free, managed single-t
 > **Operators** — [Architecture](docs/ARCHITECTURE.md) · [Providers](docs/PROVIDERS.md) · [Observability](docs/OBSERVABILITY.md) · [Metering](docs/METERING.md) · [Distribution](docs/DISTRIBUTION.md)
 >
 > **Planned work** — [`specs/`](specs/): every transport and protocol lands as a numbered spec first.
->
-> **Picking this up?** — [`docs/HANDOFF.md`](docs/HANDOFF.md): current state, invariants, open work.
 
 ---
 
