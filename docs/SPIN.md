@@ -80,6 +80,38 @@ A run prints the answer on stdout and a report on stderr:
 [spin]   round 3: 7224 chars, 6.3s, tools=[]
 ```
 
+## Task presets
+
+A preset is a named prompt scaffold, so a first command does something real
+instead of starting from a blank task. The scaffold is the literal turn-one
+prompt — read it with `-preset help` and you know exactly what the agent was
+asked to do:
+
+| Preset | Does | Writes |
+|---|---|---|
+| `summarize` | reads every text file under `-root`, one structured summary per file | `notes/<file>.md` |
+| `flashcards` | Anki-style Q/A decks from the material | `notes/<file>.flashcards.md` |
+| `eli12` | explains each file for a bright 12-year-old | `notes/<file>.eli12.md` |
+| `cite-check` | lists claims lacking a citation, with `file:line` | report to stdout |
+| `meeting-notes` | raw transcript → decisions, actions, owners | `notes/<file>.minutes.md` |
+
+```bash
+chimera-spin -preset flashcards -root ~/papers
+chimera-spin -preset summarize -root ~/notes "focus on the RFC drafts"
+chimera-spin -preset help        # print every scaffold, verbatim
+```
+
+Bare positional text **refines** a preset: it is appended as `Constraints: …`,
+so "focus on the RFC drafts" narrows every file the agent touches. `-preset`
+and an explicit task (`-task "..."`) are mutually exclusive — combining them is
+a flag error with the usage, not a guess about which you meant.
+
+Presets are plain strings in `cmd/chimera-spin/presets.go`; `internal/spin` is
+unchanged, because turn 1 simply carries the scaffold instead of your task.
+Each scaffold spells out its output convention (file naming, section
+structure) and what to do when a tool call fails — record the failure and move
+on, the same rule the harness itself follows.
+
 ## Interactive TUI
 
 `chimera-chat` is the same loop with a transcript, a tool trace and a status

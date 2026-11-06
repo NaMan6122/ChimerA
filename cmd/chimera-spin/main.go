@@ -23,11 +23,11 @@ var version = "dev"
 
 func main() {
 	var (
-		baseURL, token, model, session, root, jsonOut, task string
-		sessionsDir                                         string
-		maxRounds                                           int
-		timeout                                             time.Duration
-		showVersion, noSave                                 bool
+		baseURL, token, model, session, root, jsonOut, task, preset string
+		sessionsDir                                                 string
+		maxRounds                                                   int
+		timeout                                                     time.Duration
+		showVersion, noSave                                         bool
 	)
 	flag.StringVar(&baseURL, "base-url", envOr("CHIMERA_BASE_URL", "http://localhost:8000/v1"), "gateway base URL")
 	flag.StringVar(&token, "token", envOr("CHIMERA_API_KEY", "chimera"), "bearer token")
@@ -38,6 +38,7 @@ func main() {
 	flag.DurationVar(&timeout, "timeout", 180*time.Second, "per-turn HTTP timeout")
 	flag.StringVar(&jsonOut, "json", "", "write a run report as JSON")
 	flag.StringVar(&task, "task", "", "task for the agent (or pass it as the last argument)")
+	flag.StringVar(&preset, "preset", "", "named task scaffold: "+strings.Join(presetNames(), ", ")+", or help; mutually exclusive with -task")
 	flag.StringVar(&sessionsDir, "sessions-dir", spin.DefaultSessionsDir(), "where session transcripts are saved")
 	flag.BoolVar(&noSave, "no-save", false, "do not write a session transcript")
 	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
@@ -48,20 +49,20 @@ func main() {
 		return
 	}
 
-	if task == "" && flag.NArg() > 0 {
-		task = strings.Join(flag.Args(), " ")
+	// Task resolution lives in presets.go: -preset picks a named scaffold, bare
+	// positional text refines it (or is the task when no preset is given), and
+	// a preset together with an explicit task is a flag error.
+	task, showHelp, err := resolveTask(preset, task, strings.Join(flag.Args(), " "))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chimera-spin:", err)
+		usageExit()
+	}
+	if showHelp {
+		fmt.Print(presetHelp())
+		return
 	}
 	if strings.TrimSpace(task) == "" {
-		fmt.Fprintln(os.Stderr, `usage: chimera-spin [flags] "<task>"
-
-examples:
-  chimera-spin "where is MAX_PROMPT_CHARS enforced?"
-  chimera-spin -model chimera-deepseek -base-url http://localhost:8010/v1 "..."
-  chimera-spin -root ~/code/project "summarise internal/api/server.go"
-
-flags:`)
-		flag.PrintDefaults()
-		os.Exit(2)
+		usageExit()
 	}
 
 	absRoot, err := filepath.Abs(root)
@@ -147,4 +148,19 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// usageExit prints the flag reference and exits with a usage error (exit 2).
+func usageExit() {
+	fmt.Fprintln(os.Stderr, `usage: chimera-spin [flags] "<task>"
+
+examples:
+  chimera-spin "where is MAX_PROMPT_CHARS enforced?"
+  chimera-spin -model chimera-deepseek -base-url http://localhost:8010/v1 "..."
+  chimera-spin -root ~/code/project "summarise internal/api/server.go"
+  chimera-spin -preset flashcards -root ~/papers "focus on the proofs"
+
+flags:`)
+	flag.PrintDefaults()
+	os.Exit(2)
 }

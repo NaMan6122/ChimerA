@@ -145,6 +145,10 @@ chimera-spin -base-url http://localhost:8000/v1 -model chimera-chatgpt \
   "Read internal/spin/runner.go and count the exported functions."
 ```
 
+New to the harness? `-preset flashcards -root ~/papers` starts from a named
+scaffold — five presets (`-preset help` prints them), and extra words refine
+rather than replace.
+
 ---
 
 ## Quick start
