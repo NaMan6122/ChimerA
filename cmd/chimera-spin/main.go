@@ -28,13 +28,6 @@ func main() {
 		maxRounds                                                   int
 		timeout                                                     time.Duration
 		showVersion, noSave                                         bool
-=======
-		baseURL, token, model, session, root, jsonOut, task string
-		sessionsDir, tags                                   string
-		maxRounds                                           int
-		timeout                                             time.Duration
-		showVersion, noSave                                 bool
->>>>>>> feat/session-search
 	)
 	flag.StringVar(&baseURL, "base-url", envOr("CHIMERA_BASE_URL", "http://localhost:8000/v1"), "gateway base URL")
 	flag.StringVar(&token, "token", envOr("CHIMERA_API_KEY", "chimera"), "bearer token")
