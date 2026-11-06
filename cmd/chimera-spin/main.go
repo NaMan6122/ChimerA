@@ -25,6 +25,7 @@ func main() {
 	var (
 		baseURL, token, model, session, root, jsonOut, task, preset string
 		sessionsDir, tags                                           string
+		models                                                      string
 		maxRounds                                                   int
 		timeout                                                     time.Duration
 		showVersion, noSave                                         bool
@@ -32,6 +33,7 @@ func main() {
 	flag.StringVar(&baseURL, "base-url", envOr("CHIMERA_BASE_URL", "http://localhost:8000/v1"), "gateway base URL")
 	flag.StringVar(&token, "token", envOr("CHIMERA_API_KEY", "chimera"), "bearer token")
 	flag.StringVar(&model, "model", "chimera-chatgpt", "model id")
+	flag.StringVar(&models, "models", "", `comma-separated model ids to run the task once per model, in order (e.g. chimera-gemini,chimera-grok); overrides -model; one combined report on stdout`)
 	flag.StringVar(&session, "session", "", "session id (default: a fresh one per run)")
 	flag.StringVar(&root, "root", ".", "workspace root the tools are confined to")
 	flag.IntVar(&maxRounds, "max-rounds", 8, "hard stop on tool rounds")
@@ -73,6 +75,31 @@ func main() {
 	}
 	if session == "" {
 		session = fmt.Sprintf("spin-%d", time.Now().UnixNano())
+	}
+
+	// Compare mode: -models runs the resolved task once per model, sequentially,
+	// each with a fresh "<session>-<model>" session id, then renders one report
+	// to stdout. Without -models, the single-model run below is unchanged.
+	if strings.TrimSpace(models) != "" {
+		list, lerr := parseModelList(models)
+		if lerr != nil {
+			fmt.Fprintln(os.Stderr, "chimera-spin:", lerr)
+			usageExit()
+		}
+		os.Exit(runCompare(compareRun{
+			baseURL:     baseURL,
+			token:       token,
+			models:      list,
+			session:     session,
+			root:        absRoot,
+			maxRounds:   maxRounds,
+			timeout:     timeout,
+			sessionsDir: sessionsDir,
+			tags:        splitTags(tags),
+			noSave:      noSave,
+			jsonOut:     jsonOut,
+			task:        task,
+		}))
 	}
 
 	client := spin.NewClient(baseURL, token, model, session)

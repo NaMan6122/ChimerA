@@ -112,6 +112,37 @@ Each scaffold spells out its output convention (file naming, section
 structure) and what to do when a tool call fails — record the failure and move
 on, the same rule the harness itself follows.
 
+## Compare mode
+
+`-models` runs one task once per model against a gateway that serves several
+providers behind one port (a `PROVIDER=all` gateway), and renders one report:
+
+```bash
+chimera-spin -models chimera-gemini,chimera-grok -preset summarize -root ~/notes
+```
+
+The task (or preset) is resolved once, then executed **sequentially** — vendors
+are quota-sensitive, so there is no fan-out — once per model, each with a fresh
+session id derived as `<session>-<model>`, so no model inherits another's
+upstream conversation. Each run still writes its own transcript, and the tag
+`compare` is added to the `-tag` list, so `chimera sessions list --tag compare`
+finds every run of the batch.
+
+The report on stdout has three parts:
+
+1. a comparison table — model, wall time, rounds, tool calls, final-answer
+   characters, and a one-line gist (the first sentence of the answer, trimmed);
+2. every final answer verbatim, under a heading per model;
+3. an agreement note — pairwise token overlap between the answers
+   (stopword-stripped, lowercased), phrased qualitatively. It is a similarity
+   reading, **not a leaderboard score**, and the report says so itself.
+
+A model whose run fails gets an error row (`failed: …`, with the reason
+redacted and flattened to one line) and an empty answer section; the rest of
+the report still renders. `-models` overrides `-model`; without it, the
+single-model run is exactly as before. `-json` is a single-run flag and is
+ignored in compare mode, and the exit code is 1 only when every model failed.
+
 ## Interactive TUI
 
 `chimera-chat` is the same loop with a transcript, a tool trace and a status
