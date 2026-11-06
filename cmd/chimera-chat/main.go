@@ -183,7 +183,7 @@ func main() {
 	// Transcript: written for the user, never read back into a request.
 	if !noSave {
 		if rec, rerr := spin.NewRecorder(sessionsDir); rerr == nil {
-			rec.Start(session, modelID, baseURL, absRoot)
+			rec.Start(session, modelID, baseURL, absRoot, nil)
 			m.rec = rec
 			defer rec.Close()
 		} else {
@@ -544,7 +544,7 @@ func (m *model) restore(recs []spin.Record) {
 // rotateTranscript starts a new transcript file after /new or /use.
 func (m *model) rotateTranscript() {
 	if m.rec != nil {
-		m.rec.Start(m.client.Session, m.client.Model, m.client.BaseURL, m.root)
+		m.rec.Start(m.client.Session, m.client.Model, m.client.BaseURL, m.root, nil)
 	}
 }
 

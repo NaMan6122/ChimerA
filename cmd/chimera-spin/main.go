@@ -24,10 +24,17 @@ var version = "dev"
 func main() {
 	var (
 		baseURL, token, model, session, root, jsonOut, task, preset string
-		sessionsDir                                                 string
+		sessionsDir, tags                                           string
 		maxRounds                                                   int
 		timeout                                                     time.Duration
 		showVersion, noSave                                         bool
+=======
+		baseURL, token, model, session, root, jsonOut, task string
+		sessionsDir, tags                                   string
+		maxRounds                                           int
+		timeout                                             time.Duration
+		showVersion, noSave                                 bool
+>>>>>>> feat/session-search
 	)
 	flag.StringVar(&baseURL, "base-url", envOr("CHIMERA_BASE_URL", "http://localhost:8000/v1"), "gateway base URL")
 	flag.StringVar(&token, "token", envOr("CHIMERA_API_KEY", "chimera"), "bearer token")
@@ -40,6 +47,7 @@ func main() {
 	flag.StringVar(&task, "task", "", "task for the agent (or pass it as the last argument)")
 	flag.StringVar(&preset, "preset", "", "named task scaffold: "+strings.Join(presetNames(), ", ")+", or help; mutually exclusive with -task")
 	flag.StringVar(&sessionsDir, "sessions-dir", spin.DefaultSessionsDir(), "where session transcripts are saved")
+	flag.StringVar(&tags, "tag", "", "comma-separated tags recorded in the session transcript header (findable via: chimera sessions list --tag)")
 	flag.BoolVar(&noSave, "no-save", false, "do not write a session transcript")
 	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
 	flag.Parse()
@@ -87,7 +95,7 @@ func main() {
 	var rec *spin.Recorder
 	if !noSave {
 		if r, rerr := spin.NewRecorder(sessionsDir); rerr == nil {
-			r.Start(session, model, baseURL, absRoot)
+			r.Start(session, model, baseURL, absRoot, splitTags(tags))
 			rec = r
 			defer rec.Close()
 			fmt.Fprintf(os.Stderr, "[spin] transcript %s\n", r.Path())
@@ -141,6 +149,17 @@ func report(started time.Time, session, model, task string, res spin.Result) {
 	for _, r := range res.Rounds {
 		fmt.Fprintf(os.Stderr, "[spin]   round %d: %d chars, %.1fs, tools=%v\n", r.Round, r.Prompt, r.Latency, r.Calls)
 	}
+}
+
+// splitTags parses the -tag flag: comma-separated, trimmed, empties dropped.
+func splitTags(s string) []string {
+	var out []string
+	for _, t := range strings.Split(s, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func envOr(k, def string) string {

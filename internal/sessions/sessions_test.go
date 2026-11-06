@@ -123,6 +123,96 @@ func TestListNewestFirst(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownTags(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	writeTranscript(t, dir, "tagged", []spin.Record{
+		{TS: ts.Format(time.RFC3339Nano), Kind: "session", Session: "tagged",
+			Tags: []string{"research", "telemetry"}},
+		{TS: ts.Format(time.RFC3339Nano), Kind: "user", Text: "do the thing"},
+	})
+
+	md, err := RenderMarkdown(filepath.Join(dir, "tagged.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, "| Tags | `research`, `telemetry` |") {
+		t.Errorf("markdown metadata missing tags row:\n%s", md)
+	}
+}
+
+func TestRenderMarkdownUntaggedHasNoTagsRow(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	writeTranscript(t, dir, "plain", []spin.Record{
+		{TS: ts.Format(time.RFC3339Nano), Kind: "session", Session: "plain"},
+		{TS: ts.Format(time.RFC3339Nano), Kind: "user", Text: "do the thing"},
+	})
+
+	md, err := RenderMarkdown(filepath.Join(dir, "plain.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(md, "| Tags") {
+		t.Errorf("untagged session rendered a tags row:\n%s", md)
+	}
+}
+
+// TestSummaryCarriesTags: the header tags survive JSON round-trip and the
+// case-insensitive HasTag filter that backs `list --tag` / `search --tag`.
+func TestSummaryCarriesTags(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	writeTranscript(t, dir, "tagged", []spin.Record{
+		{TS: ts.Format(time.RFC3339Nano), Kind: "session", Session: "tagged",
+			Tags: []string{"research"}},
+		{TS: ts.Format(time.RFC3339Nano), Kind: "user", Text: "do the thing"},
+	})
+
+	s, err := LoadSummary(filepath.Join(dir, "tagged.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Tags) != 1 || s.Tags[0] != "research" {
+		t.Fatalf("summary tags = %v, want [research]", s.Tags)
+	}
+	if !HasTag(s.Tags, "RESEARCH") || HasTag(s.Tags, "other") || HasTag(s.Tags, "") {
+		t.Errorf("HasTag = (%v, %v, %v), want (true, false, false)",
+			HasTag(s.Tags, "RESEARCH"), HasTag(s.Tags, "other"), HasTag(s.Tags, ""))
+	}
+}
+
+// TestListTagFilter: `list --tag` keeps only sessions carrying the tag.
+func TestListTagFilter(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	mk := func(id string, tags []string) []spin.Record {
+		return []spin.Record{
+			{TS: ts.Format(time.RFC3339Nano), Kind: "session", Session: id, Tags: tags},
+			{TS: ts.Format(time.RFC3339Nano), Kind: "user", Text: "task " + id},
+		}
+	}
+	writeTranscript(t, dir, "researched", mk("researched", []string{"research"}))
+	writeTranscript(t, dir, "plain", mk("plain", nil))
+
+	all, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("unfiltered list = %d sessions, want 2", len(all))
+	}
+	var filtered []*Summary
+	for _, s := range all {
+		if HasTag(s.Tags, "research") {
+			filtered = append(filtered, s)
+		}
+	}
+	if len(filtered) != 1 || filtered[0].ID != "researched" {
+		t.Errorf("tag filter = %+v, want only researched", filtered)
+	}
+}
+
 func TestTornLastLineSurvives(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "torn.jsonl")

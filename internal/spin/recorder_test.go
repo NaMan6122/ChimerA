@@ -22,7 +22,7 @@ func TestRecorderWritesAndLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec.Start("sess-1", "chimera-deepseek", "http://localhost:8010/v1", "/repo")
+	rec.Start("sess-1", "chimera-deepseek", "http://localhost:8010/v1", "/repo", nil)
 	rec.Observe(Event{Kind: EventTask, Text: "read runner.go"})
 	rec.Observe(Event{Kind: EventRound, Round: 1, PromptChars: 1200, Latency: 2e9})
 	rec.Observe(Event{Kind: EventTool, Round: 1, Tool: tc("read_file", `{"path":"a.go"}`)})
@@ -51,6 +51,29 @@ func TestRecorderWritesAndLoads(t *testing.T) {
 	}
 }
 
+// TestRecorderTagsInHeader: tags given to Start land in the session header
+// record, which is what `chimera sessions list --tag` filters on.
+func TestRecorderTagsInHeader(t *testing.T) {
+	dir := t.TempDir()
+	rec, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Start("tagged", "m", "u", "r", []string{"research", "telemetry"})
+	rec.Close()
+
+	recs, err := LoadTranscript(dir, "tagged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) == 0 || recs[0].Kind != "session" {
+		t.Fatalf("transcript missing session header: %+v", recs)
+	}
+	if len(recs[0].Tags) != 2 || recs[0].Tags[0] != "research" || recs[0].Tags[1] != "telemetry" {
+		t.Errorf("header tags = %v, want [research telemetry]", recs[0].Tags)
+	}
+}
+
 // TestRecorderConfinesSessionNames: a session id is user input and must not be
 // able to write outside the sessions directory.
 func TestRecorderConfinesSessionNames(t *testing.T) {
@@ -59,7 +82,7 @@ func TestRecorderConfinesSessionNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec.Start("../../etc/passwd", "m", "u", "r")
+	rec.Start("../../etc/passwd", "m", "u", "r", nil)
 	rec.Close()
 
 	entries, err := os.ReadDir(dir)
@@ -82,9 +105,9 @@ func TestRecorderRotatesOnSessionChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec.Start("sess-a", "m", "u", "r")
+	rec.Start("sess-a", "m", "u", "r", nil)
 	rec.Note("user", "first")
-	rec.Start("sess-b", "m", "u", "r")
+	rec.Start("sess-b", "m", "u", "r", nil)
 	rec.Note("user", "second")
 	rec.Close()
 

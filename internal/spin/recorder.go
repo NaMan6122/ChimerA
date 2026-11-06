@@ -14,19 +14,20 @@ import (
 // Record is one line of a session transcript. The transcript is written for
 // humans and handoffs; nothing in it is ever read back into a request.
 type Record struct {
-	TS          string  `json:"ts"`
-	Kind        string  `json:"kind"` // session | user | round | tool | result | final | note | error
-	Session     string  `json:"session,omitempty"`
-	Model       string  `json:"model,omitempty"`
-	BaseURL     string  `json:"base_url,omitempty"`
-	Root        string  `json:"root,omitempty"`
-	Round       int     `json:"round,omitempty"`
-	Text        string  `json:"text,omitempty"`
-	Name        string  `json:"name,omitempty"`
-	Arguments   string  `json:"arguments,omitempty"`
-	Result      string  `json:"result,omitempty"`
-	PromptChars int     `json:"prompt_chars,omitempty"`
-	LatencyS    float64 `json:"latency_s,omitempty"`
+	TS          string   `json:"ts"`
+	Kind        string   `json:"kind"` // session | user | round | tool | result | final | note | error
+	Session     string   `json:"session,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	BaseURL     string   `json:"base_url,omitempty"`
+	Root        string   `json:"root,omitempty"`
+	Tags        []string `json:"tags,omitempty"` // session header only: free-form labels for list --tag / search --tag
+	Round       int      `json:"round,omitempty"`
+	Text        string   `json:"text,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Arguments   string   `json:"arguments,omitempty"`
+	Result      string   `json:"result,omitempty"`
+	PromptChars int      `json:"prompt_chars,omitempty"`
+	LatencyS    float64  `json:"latency_s,omitempty"`
 }
 
 // Recorder appends a session transcript to disk, one JSON object per line.
@@ -64,11 +65,13 @@ func NewRecorder(dir string) (*Recorder, error) {
 	return &Recorder{dir: dir}, nil
 }
 
-// Start begins (or rotates to) a transcript for one session.
+// Start begins (or rotates to) a transcript for one session. tags (nil is
+// fine) is written into the session header record so the run can be found
+// later with `chimera sessions list --tag` / `search --tag`.
 //
 // The header is appended after the lock is released: append() locks too, and
 // holding the lock across it deadlocked the first version of this file.
-func (r *Recorder) Start(session, model, baseURL, root string) {
+func (r *Recorder) Start(session, model, baseURL, root string, tags []string) {
 	r.mu.Lock()
 
 	if r.session == session && r.f != nil {
@@ -96,7 +99,7 @@ func (r *Recorder) Start(session, model, baseURL, root string) {
 	r.f = f
 	r.mu.Unlock()
 
-	r.append(Record{Kind: "session", Session: session, Model: model, BaseURL: baseURL, Root: root})
+	r.append(Record{Kind: "session", Session: session, Model: model, BaseURL: baseURL, Root: root, Tags: tags})
 }
 
 // Observe maps a loop event onto a transcript record. It is safe to call from

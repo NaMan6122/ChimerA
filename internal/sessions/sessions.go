@@ -32,6 +32,7 @@ type Summary struct {
 	Root      string
 	Task      string // first user record — the task the run was given
 	Final     string // the last final record — the answer that came out
+	Tags      []string
 	Rounds    int
 	ToolCalls int
 	Errors    int
@@ -64,6 +65,7 @@ func LoadSummary(path string) (*Summary, error) {
 		case "session":
 			s.ID = r.Session
 			s.Model = r.Model
+			s.Tags = r.Tags
 			s.BaseURL = r.BaseURL
 			s.Root = r.Root
 		case "user":
@@ -139,6 +141,13 @@ func RenderMarkdown(path string) (string, error) {
 	if sum.Root != "" {
 		b.WriteString("| Workspace | `" + sum.Root + "` |\n")
 	}
+	if len(sum.Tags) > 0 {
+		cells := make([]string, 0, len(sum.Tags))
+		for _, t := range sum.Tags {
+			cells = append(cells, "`"+t+"`")
+		}
+		b.WriteString("| Tags | " + strings.Join(cells, ", ") + " |\n")
+	}
 	b.WriteString(fmt.Sprintf("| Rounds | %d |\n| Tool calls | %d |\n", sum.Rounds, sum.ToolCalls))
 	if sum.Errors > 0 {
 		b.WriteString(fmt.Sprintf("| Errors | %d |\n", sum.Errors))
@@ -203,6 +212,21 @@ func trimResult(s string) string {
 		return s
 	}
 	return s[:max] + "\n… (truncated; full output in the JSONL transcript)"
+}
+
+// HasTag reports whether tags contains want. Comparison is trimmed and
+// case-insensitive so `--tag Research` finds a run recorded with "research".
+func HasTag(tags []string, want string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
+	if want == "" {
+		return false
+	}
+	for _, t := range tags {
+		if strings.ToLower(strings.TrimSpace(t)) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func oneLine(s string) string {
