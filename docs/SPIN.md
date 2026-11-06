@@ -244,10 +244,10 @@ The harness cost is identical; the difference is the vendor's web API.
 
 ## Tools
 
-Six, not twenty — past a handful of schemas the prompt-injected calling
+Seven, not twenty — past a handful of schemas the prompt-injected calling
 convention degrades, and every schema is prompt bytes on the first turn.
 
-`read_file` · `list_dir` · `grep` · `write_file` · `edit_file` · `run_command`
+`read_file` · `list_dir` · `grep` · `write_file` · `edit_file` · `run_command` · `read_pdf`
 
 Paths are confined to `-root`; a model that can escape the workspace is a
 liability. `edit_file` requires the search text to occur exactly once. Tool

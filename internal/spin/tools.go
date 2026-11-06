@@ -38,6 +38,8 @@ func (e *Executor) Exec(tc ToolCall) string {
 	switch tc.Function.Name {
 	case "read_file":
 		return e.readFile(args)
+	case "read_pdf":
+		return e.readPDF(args)
 	case "list_dir":
 		return e.listDir(args)
 	case "grep":
@@ -49,7 +51,7 @@ func (e *Executor) Exec(tc ToolCall) string {
 	case "run_command":
 		return e.runCommand(args)
 	default:
-		return fmt.Sprintf("error: unknown tool %q (available: read_file, list_dir, grep, write_file, edit_file, run_command)", tc.Function.Name)
+		return fmt.Sprintf("error: unknown tool %q (available: read_file, read_pdf, list_dir, grep, write_file, edit_file, run_command)", tc.Function.Name)
 	}
 }
 

@@ -56,7 +56,7 @@ func mkTool(name, desc string, props map[string]any, required ...string) ToolDef
 	return t
 }
 
-// ToolDefs returns the six tools. Past a handful of schemas the prompt-injected
+// ToolDefs returns the seven tools. Past a handful of schemas the prompt-injected
 // calling convention degrades, and every schema is prompt bytes on turn one.
 func ToolDefs() []ToolDef {
 	return []ToolDef{
@@ -83,6 +83,11 @@ func ToolDefs() []ToolDef {
 		mkTool("run_command", "Run a shell command from the repository root and return its combined output (60s limit).",
 			map[string]any{"command": prop("string", "command line to execute with bash -lc")},
 			"command"),
+		mkTool("read_pdf", "Extract text from a PDF with pdftotext -layout (poppler). Optionally limit to a 1-indexed page range. Fails with an install hint if poppler is missing; encrypted or image-only PDFs are rejected (no OCR).",
+			map[string]any{"path": prop("string", "PDF path relative to the repository root"),
+				"pages":     prop("object", `optional page range, e.g. {"from":2,"to":5}`),
+				"max_chars": prop("integer", "optional output budget below the 8000-char default; may only lower it")},
+			"path"),
 	}
 }
 
@@ -96,7 +101,7 @@ func ToolDefs() []ToolDef {
 // JSON.
 const SystemPrompt = `You are a coding agent working inside a git repository. You cannot read files, list directories or run commands directly: every action is requested by emitting a JSON block, which the harness executes and returns to you as text.
 
-Available tools: read_file, list_dir, grep, write_file, edit_file, run_command.
+Available tools: read_file, list_dir, grep, write_file, edit_file, run_command, read_pdf.
 
 To act, reply with ONLY a JSON code block and no commentary:
 

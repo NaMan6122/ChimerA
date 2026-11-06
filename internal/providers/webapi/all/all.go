@@ -7,5 +7,6 @@ import (
 	_ "github.com/chimera/chimera/internal/providers/webapi/chatgpt"
 	_ "github.com/chimera/chimera/internal/providers/webapi/deepseek"
 	_ "github.com/chimera/chimera/internal/providers/webapi/gemini"
+	_ "github.com/chimera/chimera/internal/providers/webapi/grok"
 	_ "github.com/chimera/chimera/internal/providers/webapi/qwen"
 )
