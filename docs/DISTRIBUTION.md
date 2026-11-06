@@ -74,6 +74,8 @@ Tag rules:
 
 - Tags are `v`-prefixed semver (`v0.4.0`). `dist.sh` warns and the formula's
   download URL breaks otherwise — filenames strip the `v`, release URLs keep it.
+- `CHANGELOG.md` is updated in the same commit series as the tag — release
+  notes auto-generate from commits; the changelog carries the curated story.
 - One tag = immutable release. To fix a packaging bug, cut `v0.4.1`; never
   re-push a tag (Homebrew's sha256 pinning would silently disagree with the
   archive it points at).

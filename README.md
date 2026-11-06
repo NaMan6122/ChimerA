@@ -10,7 +10,7 @@ no API keys, no per-token bill, and no prompts leaving the machine it runs on.
 Go 1.25  ·  ~21 MB static binary  ·  MIT  ·  self-host free, managed single-tenant
 ```
 
-> **Users** — [Install](#install) · [The native harness](#the-native-harness-context-lives-at-the-provider) · [API](docs/API.md) · [Chat UIs](docs/CHAT-UI.md) · [Harness internals](docs/SPIN.md)
+> **Users** — [Install](#install) · [The native harness](#the-native-harness-context-lives-at-the-provider) · [API](docs/API.md) · [Chat UIs](docs/CHAT-UI.md) · [Harness internals](docs/SPIN.md) · [Changelog](CHANGELOG.md)
 >
 > **Operators** — [Architecture](docs/ARCHITECTURE.md) · [Providers](docs/PROVIDERS.md) · [Observability](docs/OBSERVABILITY.md) · [Metering](docs/METERING.md) · [Distribution](docs/DISTRIBUTION.md)
 >
