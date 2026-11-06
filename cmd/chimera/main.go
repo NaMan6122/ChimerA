@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,6 +22,8 @@ import (
 	"github.com/chimera/chimera/internal/browser"
 	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/logging"
+	"github.com/chimera/chimera/internal/mcp"
+	"github.com/chimera/chimera/internal/meter"
 	"github.com/chimera/chimera/internal/providers"
 	"github.com/chimera/chimera/internal/providers/chatgpt"
 	"github.com/chimera/chimera/internal/providers/claude"
@@ -29,6 +32,7 @@ import (
 	"github.com/chimera/chimera/internal/providers/qwen"
 	"github.com/chimera/chimera/internal/providers/webapi"
 	_ "github.com/chimera/chimera/internal/providers/webapi/all"
+	"github.com/chimera/chimera/internal/session"
 	"github.com/chimera/chimera/internal/telemetry"
 	"github.com/go-rod/rod"
 )
@@ -73,8 +77,19 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Banner
-	fmt.Println(`
+	// MCP stdio mode (chimera --mcp, internal spec 001): stdout carries ONLY
+	// JSON-RPC bytes, so the banner and the HTTP server are skipped entirely.
+	mcpMode := false
+	for _, a := range os.Args[1:] {
+		if a == "-mcp" || a == "--mcp" {
+			mcpMode = true
+			break
+		}
+	}
+
+	// Banner (suppressed in MCP mode — stdout is the protocol stream)
+	if !mcpMode {
+		fmt.Println(`
    _____ _                   _   _       
   / ____| |                 | | (_)      
  | (___ | |_ __ _ _ __   __| |  _  ___  
@@ -84,6 +99,7 @@ func main() {
                                          
   LLM Gateway — Browser-based AI API
   `)
+	}
 
 	// Load configuration
 	cfg, err := config.Load()
@@ -93,6 +109,13 @@ func main() {
 
 	log_.Infof("Chimera starting (provider=%s, port=%d)", cfg.Provider, cfg.APIPort)
 	log_.Infof("Provider URL: %s", cfg.ProviderURL())
+
+	// MCP stdio mode: no HTTP server, no port. Providers init as usual, then
+	// Serve until stdin EOF or SIGINT (spec 001).
+	if mcpMode {
+		runMCP(cfg)
+		return
+	}
 
 	// Bind before any provider work. Otherwise a second instance validates a
 	// session (a network round trip) and only then discovers the port is taken,
@@ -319,6 +342,160 @@ func logSessionExpiry(p providers.Provider) {
 	} else {
 		log_.Infof("%s web session valid for %.0f more days", p.Name(), days)
 	}
+}
+
+// runMCP serves the Model Context Protocol over stdio (chimera --mcp, spec
+// 001). Provider construction mirrors main(): pooled (PROVIDER=all) with the
+// pool's per-provider mutexes, webapi single, or DOM single. There is no HTTP
+// server and no port bind; mcp.Serve blocks until stdin EOF or SIGINT, and
+// shutdown reuses the same close path (browser/pool) as the HTTP server.
+func runMCP(cfg *config.Config) {
+	var (
+		provs      = map[string]providers.Provider{}
+		mus        = map[string]*sync.Mutex{}
+		browserMgr *browser.Manager
+		pool       *browser.Pool
+		br         *rod.Browser // the browser behind session.Manager (nil when browserless-only)
+	)
+
+	if cfg.IsPooled() {
+		// Single Chromium, one Page per provider — same economy as the HTTP path.
+		pool = browser.NewPool(cfg)
+		providersToLaunch := cfg.PooledProviders()
+		log_.Infof("Chimera MCP pooled mode: launching single Chromium for %v", providersToLaunch)
+		if err := pool.Launch(providersToLaunch, func(name string, page *rod.Page, cfg *config.Config) interface{} {
+			return createProviderByName(name, page, cfg)
+		}); err != nil {
+			log.Fatalf("Failed to launch pool: %v", err)
+		}
+		for _, name := range pool.ProviderNames() {
+			if provI, ok := pool.ProviderFor(name); ok {
+				if prov, ok := provI.(providers.Provider); ok {
+					provs[name] = prov
+				}
+			}
+			if mu := pool.MutexFor(name); mu != nil {
+				mus[name] = mu
+			}
+		}
+		br = pool.Browser()
+	} else {
+		if cfg.UseWebAPI() {
+			ctor, ok := webapi.Lookup(cfg.Provider)
+			if !ok {
+				log_.Errorf("provider %q has no browserless transport (registered: %v)", cfg.Provider, webapi.Registered())
+				if cfg.Transport == config.TransportWebAPI {
+					os.Exit(1)
+				}
+				telemetry.ObserveTransportFallback(cfg.Provider, "webapi", "dom", "init_failed")
+			} else {
+				log_.Infof("Chimera MCP webapi transport (no browser): provider=%s session=%s",
+					cfg.Provider, cfg.SessionPath(cfg.Provider))
+				web := ctor(cfg)
+				err := web.Init(nil, cfg)
+				switch {
+				case err == nil:
+					provs[web.Name()] = web
+					mus[web.Name()] = &sync.Mutex{}
+					logSessionExpiry(web)
+					log_.Infof("Provider %q ready (model=%s, transport=webapi)", web.Name(), web.ModelID())
+				case cfg.Transport == config.TransportWebAPI:
+					log_.Errorf("webapi transport unavailable: %v", err)
+					log_.Errorf("Export a session with: node scripts/webapi-spike/cdp-capture.mjs %s", cfg.Provider)
+					os.Exit(1)
+				default:
+					telemetry.ObserveTransportFallback(cfg.Provider, "webapi", "dom", "init_failed")
+					log_.Warnf("webapi transport unavailable (%v); falling back to DOM", err)
+				}
+			}
+		}
+		if len(provs) == 0 {
+			browserMgr = browser.NewManager(cfg)
+			page, err := browserMgr.Launch()
+			if err != nil {
+				log.Fatalf("Failed to launch browser: %v", err)
+			}
+			provider := createProvider(cfg, page)
+			if err := provider.Init(page, cfg); err != nil {
+				log_.Infof("Initial provider check failed: %v", err)
+				log_.Info("Browser window is OPEN — please log in manually in the Chromium window.")
+				log_.Info("  • Use email/password, Microsoft, Apple, or magic link")
+				log_.Info("  • DO NOT use Google OAuth (blocked in automation)")
+				log_.Info("  • Waiting up to 5 minutes for login to complete...")
+				waitUntilLoggedIn(provider, 5*time.Minute)
+				log_.Infof("Login detected! Provider %q ready (model=%s)", provider.Name(), provider.ModelID())
+			} else {
+				log_.Infof("Provider %q ready (model=%s)", provider.Name(), provider.ModelID())
+			}
+			provs[provider.Name()] = provider
+			mus[provider.Name()] = &sync.Mutex{}
+		}
+	}
+
+	// Metering: same store the HTTP path uses; rows are keyed by the MCP
+	// client name from initialize (tenant "mcp:<client>").
+	var mtr *meter.Store
+	if strings.TrimSpace(cfg.MeterDB) != "" {
+		if st, err := meter.Open(cfg.MeterDB); err != nil {
+			log_.Errorf("Metering disabled, cannot open %q: %v", cfg.MeterDB, err)
+		} else {
+			mtr = st
+		}
+	}
+
+	// SIGINT/SIGTERM: reuse the shutdown path — close browser/pool.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log_.Info("Shutting down...")
+		closeBrowsers(pool, browserMgr)
+		os.Exit(0)
+	}()
+
+	deps := &mcp.Deps{
+		Cfg:        cfg,
+		Providers:  provs,
+		Mus:        mus,
+		SessionMgr: session.New(br, 10),
+		Meter:      mtr,
+		Log:        log_,
+		Version:    version,
+	}
+	// One login-state cache seed at startup, so the `providers` tool can
+	// answer from cache without ever touching a browser mid-call.
+	deps.SeedLoginStates()
+
+	log_.Infof("MCP stdio server ready (providers: %v)", sortedNames(provs))
+	log_.Info("Serving JSON-RPC on stdin/stdout until EOF")
+
+	if err := mcp.Serve(os.Stdin, os.Stdout, deps); err != nil {
+		log_.Errorf("MCP server error: %v", err)
+	}
+
+	log_.Info("Chimera stopped")
+	closeBrowsers(pool, browserMgr)
+	if mtr != nil {
+		_ = mtr.Close()
+	}
+}
+
+// closeBrowsers is the shared shutdown step for both serve modes.
+func closeBrowsers(pool *browser.Pool, mgr *browser.Manager) {
+	if pool != nil {
+		_ = pool.Close()
+	} else if mgr != nil {
+		_ = mgr.Close()
+	}
+}
+
+func sortedNames(provs map[string]providers.Provider) []string {
+	names := make([]string, 0, len(provs))
+	for n := range provs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // webapi.Retryable / webapi.Reason (internal/providers/webapi) classify webapi

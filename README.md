@@ -290,6 +290,26 @@ Endpoints, request/response shapes, auth header forms:
 | `API_PORT` | `8000` | listen port |
 | `API_TOKEN` / `API_TOKENS` | off | single or multi-tenant bearer auth |
 
+## MCP stdio mode
+
+`chimera --mcp` serves the same providers as a Model Context Protocol server
+over stdio (newline-delimited JSON-RPC 2.0; stdout carries protocol bytes
+only, logging stays on stderr). Tools: `chat`, `refresh`, `providers`. Register it in Claude Code or Cursor:
+
+```json
+{
+  "mcpServers": {
+    "chimera": {
+      "command": "/usr/local/bin/chimera",
+      "args": ["--mcp"],
+      "env": { "PROVIDER": "all", "TRANSPORT": "auto", "METER_DB": "./logs/usage.db" }
+    }
+  }
+}
+```
+
+Metering rows are keyed `mcp:<clientName>`; pass `session_id` to `chat` to continue an upstream conversation.
+
 ---
 
 ## Self-host or managed
