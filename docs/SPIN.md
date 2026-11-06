@@ -183,6 +183,21 @@ Every session is recorded to disk, one JSON object per line:
 $CHIMERA_SESSIONS_DIR/<session>.jsonl        # default ~/.local/share/chimera/sessions
 ```
 
+Sessions are **preservation, not resumption**: the provider side of an old
+conversation expires, and the harness never stored anything to re-send. What
+you keep is the run itself — readable, indexable, yours:
+
+```bash
+chimera sessions list              # index: started, id, rounds, tools, duration, task
+chimera sessions show <id>         # the runbook (Markdown) to stdout
+chimera sessions export <id> -o runbook.md
+chimera sessions -dir <path> list  # a different sessions directory
+```
+
+The runbook carries a metadata block (model, gateway, workspace, rounds,
+tool calls, duration), the task, a step per round with tool calls and
+results, and the final answer.
+
 ```
 {"kind":"session","model":"chimera-deepseek","root":"/repo",...}
 {"kind":"user","text":"list the files in internal/spin"}
