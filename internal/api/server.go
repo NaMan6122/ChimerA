@@ -531,11 +531,33 @@ func (s *Server) handleProvidersHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Providers implementing the optional QuotaReporter surface their cached
+	// quota (refreshed at Init / after turns — never polled) next to login
+	// state. Absence of the interface simply omits the field.
+	data := telemetry.Snapshot(modelsByName)
+	entries := make([]providerHealthEntry, len(data))
+	for i, h := range data {
+		entries[i] = providerHealthEntry{ProviderHealth: h}
+		if p := s.providers[h.Provider]; p != nil {
+			if qr, ok := p.(providers.QuotaReporter); ok {
+				entries[i].Quota = telemetry.QuotaFromMap(qr.Quota())
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"object": "provider_health",
-		"data":   telemetry.Snapshot(modelsByName),
+		"data":   entries,
 	})
+}
+
+// providerHealthEntry extends the telemetry snapshot with the optional
+// quota object. Embedding keeps the JSON shape byte-identical for providers
+// that do not report quota (nil pointer + omitempty).
+type providerHealthEntry struct {
+	telemetry.ProviderHealth
+	Quota *telemetry.Quota `json:"quota,omitempty"`
 }
 
 // handleUsage returns the caller's usage summary over the inclusive window

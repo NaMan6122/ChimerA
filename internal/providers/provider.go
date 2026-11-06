@@ -30,3 +30,18 @@ type Provider interface {
 	// IsLoggedIn checks whether the user is authenticated.
 	IsLoggedIn() (bool, error)
 }
+
+// QuotaReporter is optionally implemented by providers that can report a
+// cached usage quota (e.g. grok's /rest/rate-limits probe). Callers — the
+// health handler is the intended one — type-check for it; providers without
+// the interface simply carry no quota field in their health snapshot.
+//
+// Implementations must return the LAST KNOWN snapshot, never a live call:
+// quota is refreshed at Init and after turns, not on demand. Recognized
+// keys are "remaining" (int), "total" (int, optional) and "window"
+// (string, optional); return nil when nothing has been cached yet. The map
+// is served verbatim to API clients, so it must never carry credential
+// material.
+type QuotaReporter interface {
+	Quota() map[string]any
+}

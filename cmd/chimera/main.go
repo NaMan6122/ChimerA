@@ -49,6 +49,13 @@ func main() {
 		runSessions(os.Args[2:])
 		return
 	}
+
+	// `chimera doctor ...` checks the local install; it is not the server.
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		runDoctor(os.Args[2:])
+		return
+	}
+
 	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
 		fmt.Printf("chimera %s\n", version)
 		return
@@ -61,6 +68,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  gateway:  chimera                       (no arguments; serves :8000)")
 		fmt.Fprintln(os.Stderr, "  auth:     chimera auth login|status|check")
 		fmt.Fprintln(os.Stderr, "  sessions: chimera sessions list|show|export")
+		fmt.Fprintln(os.Stderr, "  doctor:   chimera doctor [--probe]            (local install health check)")
 		fmt.Fprintln(os.Stderr, "  harness:  chimera-spin \"<task>\"          (separate binary, needs a running gateway)")
 		os.Exit(2)
 	}

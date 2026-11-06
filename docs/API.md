@@ -21,6 +21,30 @@ Gateway info.
 {"name":"Chimera Gateway","version":"0.1.0","status":"running","provider":"chatgpt"}
 ```
 
+### `GET /v1/health/providers`
+Per-provider login + quota snapshot for status pages and alerting. Requires auth like other `/v1/*`. Probes each provider's `IsLoggedIn` in parallel (15s budget; slow probes keep their previous state).
+
+```json
+{
+  "object":"provider_health",
+  "data":[
+    {"provider":"grok","model":"chimera-grok","up":true,"logged_in":true,
+     "last_success_unix":1770000000,"last_check_unix":1770000000,
+     "quota":{"remaining":21}},
+    {"provider":"qwen","model":"chimera-qwen","up":true,"logged_in":true}
+  ]
+}
+```
+
+- `quota` appears **only** for providers implementing the optional
+  `providers.QuotaReporter` interface (currently grok, which caches its
+  `/rest/rate-limits` reading at Init and after each turn — no background
+  polling). Shape: `{remaining, total?, window?}`; `total`/`window` are
+  omitted while unknown. A reporter with nothing cached emits no `quota`
+  key at all.
+- `last_error` is set when the last probe failed; `last_success_unix` /
+  `last_check_unix` are unix seconds, omitted until the first event.
+
 ### `GET /v1/models`
 Lists the active provider's model.
 

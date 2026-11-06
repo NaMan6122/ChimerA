@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chimera/chimera/internal/config"
@@ -41,6 +42,18 @@ type Provider struct {
 
 	mu    sync.Mutex
 	convs map[string]convState
+
+	// quota caches the last known rate-limits reading for the health
+	// endpoint (providers.QuotaReporter). Refreshed at Init and after
+	// turns only — never polled in the background.
+	quota atomic.Value // *quotaSnapshot
+}
+
+// quotaSnapshot is one reading of grok.com's remainingQueries. atomic.Value
+// stores the pointer so readers never observe a torn write; the concrete
+// type is stable (a second type would panic on Store).
+type quotaSnapshot struct {
+	remaining int
 }
 
 // convState is one thread's server-side conversation pointer plus the
@@ -135,8 +148,38 @@ func (p *Provider) Init(_ *rod.Page, cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("grok web session rejected (re-export %s): %w", cfg.SessionPath(config.ProviderGrok), err)
 	}
+	p.cacheQuota(remaining)
 	p.log.Infof("grok session accepted, remainingQueries=%d", remaining)
 	return nil
+}
+
+// cacheQuota stores the latest rate-limits reading for the health endpoint.
+func (p *Provider) cacheQuota(remaining int) {
+	p.quota.Store(&quotaSnapshot{remaining: remaining})
+}
+
+// refreshQuota re-probes the quota endpoint best-effort. A failed probe
+// keeps the previous reading — a stale number is more useful than none,
+// and the next turn refreshes again.
+func (p *Provider) refreshQuota() {
+	if p.client == nil {
+		return
+	}
+	if remaining, err := p.client.RateLimits(); err == nil {
+		p.cacheQuota(remaining)
+	}
+}
+
+// Quota implements providers.QuotaReporter: the last cached remaining
+// quota, refreshed at Init and after turns. totalQueries/window are not
+// exposed by the client yet, so the map carries "remaining" only; the
+// health endpoint omits the optional fields.
+func (p *Provider) Quota() map[string]any {
+	s, ok := p.quota.Load().(*quotaSnapshot)
+	if !ok || s == nil {
+		return nil
+	}
+	return map[string]any{"remaining": s.remaining}
 }
 
 // SendMessage performs one turn. A stable threadID reuses its conversation
@@ -177,6 +220,10 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 
 	p.log.Infof("turn done conv=%s prompt_chars=%d history_turns=%d out_chars=%d reasoning_chars=%d total_ms=%d",
 		shortID(res.ConversationID), len(wire), len(st.history), len(res.Content), len(res.Reasoning), res.Duration.Milliseconds())
+
+	// Refresh the cached quota off the response path (after turns only —
+	// no background polling); the turn's answer does not wait on it.
+	go p.refreshQuota()
 
 	return &models.ProviderResponse{
 		Message:   res.Content,
@@ -223,3 +270,4 @@ func (p *Provider) SessionExpiry() (time.Time, bool) {
 }
 
 var _ providers.Provider = (*Provider)(nil)
+var _ providers.QuotaReporter = (*Provider)(nil)
