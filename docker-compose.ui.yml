@@ -1,0 +1,94 @@
+# ──────────────────────────────────────────────────────────────────────
+# Chimera + Open WebUI
+# ──────────────────────────────────────────────────────────────────────
+# Two ways to use this file:
+#
+#   1. UI only — the gateway already runs on the host (README quick start):
+#        docker compose -f docker-compose.ui.yml up -d
+#
+#   2. UI + gateway — also start the browserless gateway in a container:
+#        docker compose -f docker-compose.ui.yml --profile gateway up -d
+#      Needs an exported session first, created on the HOST (the login opens
+#      a real browser once):
+#        chimera auth login chatgpt        # writes auth_data/chatgpt.json
+#
+#   Validate offline without starting anything:
+#        docker compose -f docker-compose.ui.yml config
+#
+# This file is browserless only (TRANSPORT=webapi — no Chromium, no VNC).
+# For the browser path use docker-compose.yml.
+
+services:
+  # ── Chat UI ────────────────────────────────────────────────────────────
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: chimera-open-webui
+    ports:
+      - "3000:8080"            # UI at http://localhost:3000
+    extra_hosts:
+      # Maps host.docker.internal to the host's gateway IP. Built-in (and this
+      # entry a no-op) on Docker Desktop for macOS/Windows; REQUIRED on Linux,
+      # where the name does not resolve by default.
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Where the UI finds Chimera's OpenAI-compatible API. host.docker.internal
+      # is how a container reaches a gateway running on the host — this default
+      # works for both a host-run gateway and the containerized one below (its
+      # port 8000 is published). If you prefer to skip the host hop when using
+      # the in-compose gateway, point at the service instead:
+      #   OPENAI_API_BASE_URL=http://chimera:8000/v1
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
+      # Bearer token the UI sends on every request; must match the gateway's
+      # API_TOKEN below. If the gateway runs without API_TOKEN, auth is off and
+      # any non-empty value works — the field just cannot be blank.
+      - OPENAI_API_KEY=${API_TOKEN:-chimera}
+      # Open WebUI probes for a local Ollama by default. Turning it off keeps
+      # the model picker to Chimera's chimera-* models only.
+      - ENABLE_OLLAMA=0
+    volumes:
+      # UI-local state: the admin account you create on first run, chats,
+      # settings. Survives container replacement.
+      - open-webui:/app/backend/data
+    restart: unless-stopped
+
+  # ── Chimera gateway (optional; browserless) ────────────────────────────
+  chimera:
+    build: .
+    container_name: chimera-gateway
+    profiles:
+      # Only starts with --profile gateway, so `up` alone gives you just the UI.
+      - gateway
+    # The image's default entrypoint supervises Chromium + VNC for the browser
+    # path. Overriding it runs the gateway binary alone — no browser process.
+    entrypoint: ["/usr/local/bin/chimera"]
+    ports:
+      - "8000:8000"            # OpenAI-compatible API at http://localhost:8000
+    environment:
+      # Replay the vendor's HTTP API with the exported session — the ~24 MB
+      # path with no browser process.
+      - TRANSPORT=webapi
+      # Which provider this gateway serves; the model id becomes
+      # chimera-<provider>. Browserless serves ONE provider per process — to
+      # expose a second one, copy this service, change PROVIDER and the
+      # published port, and add its base URL to the UI.
+      - PROVIDER=${PROVIDER:-chatgpt}
+      # Listen port inside the container (must match the published 8000 above
+      # unless you change both).
+      - API_PORT=8000
+      # Bearer auth for /v1/*. Leave unset to run without auth (any value then
+      # works in the UI's key field). Must match OPENAI_API_KEY above.
+      - API_TOKEN=${API_TOKEN:-chimera}
+      # Global token bucket: 1 request every N seconds; 0 disables. Chat UIs
+      # fire small side requests (titles, tags) around each message — set 0
+      # while testing if you see 429s.
+      - RATE_LIMIT_SECONDS=${RATE_LIMIT_SECONDS:-2}
+    volumes:
+      # Exported sessions (auth_data/<provider>.json) — password-equivalent,
+      # created on the host by `chimera auth login <provider>`.
+      - ./auth_data:/app/auth_data
+      # Gateway logs, including the SQLite usage ledger.
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+volumes:
+  open-webui:
