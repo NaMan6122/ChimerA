@@ -505,7 +505,7 @@ var knownEnvKeys = map[string]bool{
 	"TYPING_SPEED_MIN": true, "TYPING_SPEED_MAX": true,
 	"THINKING_PAUSE_MIN": true, "THINKING_PAUSE_MAX": true,
 	// logging
-	"LOG_DIR": true, "LOG_LEVEL": true, "VERBOSE": true,
+	"LOG_DIR": true, "LOG_LEVEL": true, "LOG_FORMAT": true, "VERBOSE": true,
 	// API server
 	"API_HOST": true, "API_PORT": true, "RATE_LIMIT_SECONDS": true,
 	"API_TOKEN": true, "API_TOKENS": true,
