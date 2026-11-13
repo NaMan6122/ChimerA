@@ -254,6 +254,7 @@ you keep is the run itself — readable, indexable, yours:
 chimera sessions list              # index: started, id, rounds, tools, duration, task
 chimera sessions show <id>         # the runbook (Markdown) to stdout
 chimera sessions export <id> -o runbook.md
+chimera sessions export --all -o vault/   # one runbook per session + index.md
 chimera sessions -dir <path> list  # a different sessions directory
 ```
 
@@ -283,6 +284,17 @@ handoffs, auditing and recovery without paying for it in prompt size.
 - `/transcript` prints the file in use.
 - `-no-save` disables recording; `-sessions-dir` moves it.
 - Session ids are sanitised, so an id cannot escape the directory.
+
+In the TUI, `/sessions` browses the archive and restores a transcript for
+display only — the live conversation is untouched.
+
+And a preserved run can become a seed again: `chimera-spin
+-from-session <id>` starts a FRESH upstream conversation with a budgeted
+digest of the transcript (task, per-round digest, previous final answer)
+above the new task. `chimera sessions rehydrate <id>` prints that block
+standalone. This is reuse without resumption: the harness composes the
+prompt, the provider is never asked to remember anything, nothing is
+re-executed.
 
 The gateway preserves too: every turn through `/v1/chat/completions` (web UIs,
 curl, harnesses) is appended to the same directory, tagged `gateway`. With no

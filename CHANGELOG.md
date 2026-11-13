@@ -5,6 +5,22 @@ All notable changes to Chimera are documented here. Format follows
 their GitHub releases. Cutting a release includes updating this file —
 see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
+## [Unreleased]
+
+### Added — session tooling
+
+- **Vault export**: `chimera sessions export --all -o <dir>` writes one
+  runbook per session plus an `index.md` table (`--html` for HTML pages);
+  idempotent on re-export.
+- **`/sessions` picker (TUI)**: browse and view any preserved session from
+  the chat UI, display only — the live conversation is untouched. Bare
+  `/sessions` opens the picker; `/sessions <id>` restores directly.
+- **Rehydrate — reuse without resumption**: `chimera-spin -from-session <id>`
+  seeds a fresh upstream conversation with a budgeted digest of a preserved
+  transcript (task, per-round digest, previous final answer);
+  `chimera sessions rehydrate <id>` prints the same block standalone.
+  Nothing is re-executed and the provider is never asked to remember.
+
 ## [v0.3.0](https://github.com/NaMan6122/ChimerA/releases/tag/v0.3.0) — 2026-11-13
 
 ### Added — agent hardening (SWE readiness)

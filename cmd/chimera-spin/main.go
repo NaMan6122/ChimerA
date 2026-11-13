@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chimera/chimera/internal/sessions"
 	"github.com/chimera/chimera/internal/spin"
 )
 
@@ -24,7 +25,8 @@ var version = "dev"
 func main() {
 	var (
 		baseURL, token, model, session, root, jsonOut, task, preset string
-		sessionsDir, tags                                           string
+		sessionsDir, tags, fromSession                              string
+		contextChars                                                int
 		models                                                      string
 		maxRounds                                                   int
 		timeout, cmdTimeout                                         time.Duration
@@ -44,6 +46,8 @@ func main() {
 	flag.DurationVar(&timeout, "timeout", 180*time.Second, "per-turn HTTP timeout")
 	flag.StringVar(&jsonOut, "json", "", "write a run report as JSON")
 	flag.StringVar(&task, "task", "", "task for the agent (or pass it as the last argument)")
+	flag.StringVar(&fromSession, "from-session", "", "seed this task with a context digest of a preserved session (fresh upstream conversation; see: chimera sessions rehydrate)")
+	flag.IntVar(&contextChars, "context-chars", sessions.DefaultRehydrateBudget, "budget for the -from-session context block")
 	flag.StringVar(&preset, "preset", "", "named task scaffold: "+strings.Join(presetNames(), ", ")+", or help; mutually exclusive with -task")
 	flag.StringVar(&sessionsDir, "sessions-dir", spin.DefaultSessionsDir(), "where session transcripts are saved")
 	flag.StringVar(&tags, "tag", "", "comma-separated tags recorded in the session transcript header (findable via: chimera sessions list --tag)")
@@ -113,6 +117,19 @@ func main() {
 		os.Exit(1)
 	}
 	client.Refresh()
+
+	// Rehydration: seed this fresh conversation with a digest of a preserved
+	// session. The provider is never asked to remember anything — the harness
+	// composes the prompt, which is fully in our control.
+	if fromSession != "" {
+		block, err := sessions.RehydrateContext(filepath.Join(sessionsDir, fromSession+".jsonl"), contextChars)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "spin:", err)
+			os.Exit(1)
+		}
+		task = block + "\nNew task:\n" + task
+		fmt.Fprintf(os.Stderr, "[spin] rehydrated %s (%d chars of context) — fresh conversation, nothing replayed\n", fromSession, len(block))
+	}
 
 	// The transcript is a side-channel: it observes the loop and never feeds
 	// anything back into a request.
