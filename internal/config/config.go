@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/chimera/chimera/internal/auth"
+	"github.com/chimera/chimera/internal/spin"
 	"github.com/joho/godotenv"
 )
 
@@ -117,6 +118,11 @@ type Config struct {
 	MeterDB              string
 	QuotaMonthlyRequests int
 
+	// Local history: gateway turns are appended to per-conversation
+	// transcripts readable with `chimera sessions` (see internal/sessions).
+	// SessionsDir "" disables recording.
+	SessionsDir string
+
 	// VNC
 	VNCPassword string
 
@@ -222,6 +228,14 @@ func Load() (*Config, error) {
 		cfg.MeterDB = strings.TrimSpace(v)
 	}
 	cfg.QuotaMonthlyRequests = getEnvInt("QUOTA_MONTHLY_REQUESTS", 0)
+
+	// Session transcripts: on by default at the shared sessions dir, so every
+	// surface (spin, TUI, gateway) preserves into one place. An explicitly
+	// empty SESSIONS_DIR disables gateway recording.
+	cfg.SessionsDir = spin.DefaultSessionsDir()
+	if v, ok := os.LookupEnv("SESSIONS_DIR"); ok {
+		cfg.SessionsDir = strings.TrimSpace(v)
+	}
 
 	// Parse credentials now so bad API_TOKENS fails fast instead of opening the gateway.
 	keys, err := auth.New(cfg.APIToken, cfg.APITokens)

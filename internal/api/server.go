@@ -21,6 +21,7 @@ import (
 	"github.com/chimera/chimera/internal/models"
 	"github.com/chimera/chimera/internal/providers"
 	"github.com/chimera/chimera/internal/session"
+	"github.com/chimera/chimera/internal/spin"
 	"github.com/chimera/chimera/internal/telemetry"
 	"github.com/chimera/chimera/internal/tools"
 	"github.com/go-chi/chi/v5"
@@ -44,7 +45,12 @@ type Server struct {
 	limiter    *rate.Limiter
 	keys       *auth.Keys   // credential -> tenant registry
 	meter      *meter.Store // usage recording, nil when METER_DB=""
-	mu         sync.Mutex   // serializes browser access for single mode
+
+	// transcripts preserves every provider turn as a local session transcript
+	// (readable later with `chimera sessions`), nil when SESSIONS_DIR="".
+	transcripts *spin.Store
+
+	mu sync.Mutex // serializes browser access for single mode
 
 	// convSeen tracks what has already been sent upstream per conversation, so
 	// stateless clients that re-send growing history do not make the gateway
@@ -95,16 +101,27 @@ func openMeter(cfg *config.Config) *meter.Store {
 	return st
 }
 
+// openTranscripts opens gateway session recording unless SESSIONS_DIR is
+// empty. Fail-open like metering: a bad path must not take the gateway down,
+// and the Store warns once per process instead.
+func openTranscripts(cfg *config.Config) *spin.Store {
+	if cfg == nil || strings.TrimSpace(cfg.SessionsDir) == "" {
+		return nil
+	}
+	return spin.NewStore(cfg.SessionsDir, 0)
+}
+
 // NewServer creates a new API server for single provider.
 func NewServer(cfg *config.Config, provider providers.Provider) *Server {
 	s := &Server{
-		cfg:       cfg,
-		provider:  provider,
-		providers: map[string]providers.Provider{provider.Name(): provider},
-		mus:       map[string]*sync.Mutex{provider.Name(): &sync.Mutex{}},
-		limiter:   newRateLimiter(cfg),
-		keys:      keysForConfig(cfg),
-		meter:     openMeter(cfg),
+		cfg:         cfg,
+		provider:    provider,
+		providers:   map[string]providers.Provider{provider.Name(): provider},
+		mus:         map[string]*sync.Mutex{provider.Name(): &sync.Mutex{}},
+		limiter:     newRateLimiter(cfg),
+		keys:        keysForConfig(cfg),
+		meter:       openMeter(cfg),
+		transcripts: openTranscripts(cfg),
 	}
 
 	s.router = chi.NewRouter()
@@ -118,14 +135,15 @@ func NewServer(cfg *config.Config, provider providers.Provider) *Server {
 // poolProviders is map from provider name to Provider, mus is per-provider mutex from browser.Pool.
 func NewPooledServer(cfg *config.Config, poolProviders map[string]providers.Provider, poolMus map[string]*sync.Mutex, browser *rod.Browser) *Server {
 	s := &Server{
-		cfg:        cfg,
-		providers:  poolProviders,
-		mus:        poolMus,
-		browser:    browser,
-		limiter:    newRateLimiter(cfg),
-		keys:       keysForConfig(cfg),
-		meter:      openMeter(cfg),
-		sessionMgr: session.New(browser, 10),
+		cfg:         cfg,
+		providers:   poolProviders,
+		mus:         poolMus,
+		browser:     browser,
+		limiter:     newRateLimiter(cfg),
+		keys:        keysForConfig(cfg),
+		meter:       openMeter(cfg),
+		transcripts: openTranscripts(cfg),
+		sessionMgr:  session.New(browser, 10),
 	}
 	// Set default single provider for fallback (prefer chatgpt if present)
 	if p, ok := poolProviders[config.ProviderChatGPT]; ok {
@@ -778,7 +796,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Non-streaming — per-provider serialized with timeout (no infinite hang).
+	turnStart := time.Now()
 	text, code, errType, errMsg := s.doProviderTurn(r, alog, provider, mu, providerName, req.Model, tenant, prompt, threadID, sessionID)
+	// Preserve the turn locally: what was asked, what came back (or failed).
+	s.recordTurn(transcriptID(sessionID, tenant, req.Messages), providerName, provider.ModelID(),
+		lastUserMsg, prompt, text, turnFailure(code, errMsg), time.Since(turnStart))
 	if code != http.StatusOK {
 		writeJSONError(w, code, errType, errMsg)
 		return
@@ -895,7 +917,10 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	turnStart := time.Now()
 	text, code, errType, errMsg := s.doProviderTurn(r, alog, provider, mu, providerName, req.Model, tenant, prompt, threadID, sessionID)
+	s.recordTurn(transcriptID(sessionID, tenant, msgs), providerName, provider.ModelID(),
+		extractLastUserMessage(msgs), prompt, text, turnFailure(code, errMsg), time.Since(turnStart))
 	if code != http.StatusOK {
 		writeJSONError(w, code, errType, errMsg)
 		return
@@ -941,6 +966,59 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(respObj)
+}
+
+// turnFailure renders a failed turn's note text; "" when the turn succeeded.
+func turnFailure(code int, errMsg string) string {
+	if code == http.StatusOK {
+		return ""
+	}
+	return fmt.Sprintf("turn failed (HTTP %d): %s", code, errMsg)
+}
+
+// transcriptID picks the transcript id for a gateway conversation: the
+// client's session id when it sent one, else a stable digest of the tenant
+// and the conversation opening (system + first user message). A stateless
+// client that re-sends growing history therefore appends to one transcript
+// instead of producing one file per turn, and the digest is deterministic,
+// so a conversation continued after a gateway restart lands in the same file.
+// UI side-requests (title/tag generation) have a different opening and so get
+// their own small, deletable transcripts.
+func transcriptID(sessionID, tenant string, msgs []models.ChatMessage) string {
+	if sessionID != "" {
+		return sessionID
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "tenant:%s\n", tenant)
+	for _, m := range msgs {
+		if m.Role == "system" {
+			fmt.Fprintf(h, "system:%s\n", m.UnmarshalContent())
+		}
+	}
+	for _, m := range msgs {
+		if m.Role == "user" {
+			fmt.Fprintf(h, "user:%s\n", m.UnmarshalContent())
+			break
+		}
+	}
+	return "gw-" + hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// recordTurn appends one provider turn to the session transcript store.
+// No-op when recording is disabled (SESSIONS_DIR=""). Only turns that reached
+// the provider are preserved: pre-flight rejections (too long, quota, rate
+// limit) never became a conversation and are left out deliberately.
+func (s *Server) recordTurn(sessionID, providerName, model, userMsg, prompt, answer, errText string, latency time.Duration) {
+	s.transcripts.Record(spin.Turn{
+		Session:     sessionID,
+		Model:       model,
+		Tags:        []string{"gateway", providerName},
+		User:        userMsg,
+		Answer:      answer,
+		Err:         errText,
+		PromptChars: len(prompt),
+		Latency:     latency,
+	})
 }
 
 // saveSessionURL persists the conversation URL for X-Session-Id continuity.
@@ -1030,6 +1108,8 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 		telemetry.ObserveProviderError(providerName, "send_error")
 		telemetry.ObserveChatRequest(providerName, req.Model, "500")
 		s.recordUsage(tenant, providerName, req.Model, true, len(prompt), 0, time.Since(sendStart), 500)
+		s.recordTurn(transcriptID(sessionID, tenant, req.Messages), providerName, provider.ModelID(),
+			extractLastUserMessage(req.Messages), prompt, "", fmt.Sprintf("turn failed: %v", err), time.Since(sendStart))
 		errorChunk := models.ChatCompletionChunk{
 			ID:      respID,
 			Object:  "chat.completion.chunk",
@@ -1045,8 +1125,10 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 	telemetry.ObserveChatRequest(providerName, req.Model, "200")
 	s.recordUsage(tenant, providerName, req.Model, true, len(prompt), len(providerResp.Message), time.Since(sendStart), 200)
 	s.saveSessionURL(sessionID, provider)
-
 	text := providerResp.Message
+	// Preserve the turn locally, mirroring the non-streaming path.
+	s.recordTurn(transcriptID(sessionID, tenant, req.Messages), providerName, provider.ModelID(),
+		extractLastUserMessage(req.Messages), prompt, text, "", time.Since(sendStart))
 	// Streaming clients (agent harnesses like anv/opencode) read tool calls from
 	// delta.tool_calls, not from content. Parse first; when a call is present,
 	// emit it as a delta and terminate with finish_reason "tool_calls" instead

@@ -235,3 +235,32 @@ for the one unavoidable hop to the vendor itself. That is the
 One boundary to keep straight: `auth_data/*.json` are password-equivalent —
 see [`SECURITY.md`](../SECURITY.md). Keep that directory out of any backup you
 do not control.
+
+---
+
+## Local history
+
+The gateway preserves every provider turn locally — the same promise the
+harness and TUI already keep, so a conversation held in Open WebUI or Chatbox
+survives the UI, the container and the vendor's own expiry:
+
+```
+~/.local/share/chimera/sessions/<conversation>.jsonl     # SESSIONS_DIR
+```
+
+One file per conversation: with an `X-Session-Id` header the client names it,
+otherwise the conversation's opening (system + first user message) derives a
+stable id, so a UI re-sending growing history appends to one transcript.
+Failed turns are kept as error notes. Read it back any time:
+
+```bash
+chimera sessions list --tag gateway   # only gateway-recorded conversations
+chimera sessions show <id>            # the readable runbook (Markdown)
+chimera sessions export <id> --html -o runbook.html
+```
+
+Sessions are **preservation, not resumption**: the vendor side expires on its
+own schedule; what you keep is what was asked and what came back. Set
+`SESSIONS_DIR=""` to disable, or point it elsewhere to separate archives.
+UI side-requests (title/tag generation) have a different opening and show up
+as their own small transcripts — delete at will.

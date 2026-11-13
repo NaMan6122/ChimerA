@@ -163,8 +163,21 @@ func RenderMarkdown(path string) (string, error) {
 	}
 	b.WriteString("## Run\n\n")
 	currentRound := -1
+	userSeen := false // the first user record is the Task section above
 	for _, r := range recs {
 		switch r.Kind {
+		case "user":
+			// Spin transcripts carry exactly one user record (the task), so
+			// this only fires for multi-turn conversations — e.g. a UI chat
+			// preserved by the gateway, where every later user message is a
+			// turn of its own and belongs in the run.
+			if !userSeen {
+				userSeen = true
+				continue
+			}
+			if strings.TrimSpace(r.Text) != "" {
+				b.WriteString("**User:** " + strings.TrimSpace(r.Text) + "\n\n")
+			}
 		case "round":
 			if r.Round != currentRound {
 				currentRound = r.Round
