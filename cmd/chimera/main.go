@@ -64,12 +64,33 @@ func main() {
 		fmt.Printf("chimera %s\n", version)
 		return
 	}
-	// The gateway takes no subcommand. Saying so beats starting a server under a
-	// name that looks like one ("chimera spin" is the most likely typo: the
-	// harness is a separate binary).
-	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+
+	// `chimera up [provider|all]` starts backends without the env-var dance.
+	// A `chimera-<provider>` symlink (chimera-kimi, chimera-gpt, …) is the same
+	// thing in one word. When runUp returns true the environment is prepared and
+	// this process becomes the gateway — but "up" is still sitting in os.Args,
+	// so the unknown-command check below must be told it was consumed.
+	upHandled := false
+	if prov := providerFromArgv0(os.Args[0]); prov != "" {
+		if !runUp([]string{prov}) {
+			return
+		}
+		upHandled = true
+	} else if len(os.Args) > 1 && os.Args[1] == "up" {
+		if !runUp(os.Args[2:]) {
+			return
+		}
+		upHandled = true
+	}
+
+	// The gateway takes no other subcommand. Saying so beats starting a server
+	// under a name that looks like one ("chimera spin" is the most likely typo:
+	// the harness is a separate binary).
+	if !upHandled && len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
 		fmt.Fprintln(os.Stderr, "  gateway:  chimera                       (no arguments; serves :8000)")
+		fmt.Fprintln(os.Stderr, "  backends: chimera up [provider|all]     (first free port in 8000-8011)")
+		fmt.Fprintln(os.Stderr, "            chimera-kimi, chimera-gpt, …  (same thing, one word)")
 		fmt.Fprintln(os.Stderr, "  auth:     chimera auth login|status|check")
 		fmt.Fprintln(os.Stderr, "  sessions: chimera sessions list|show|export")
 		fmt.Fprintln(os.Stderr, "  doctor:   chimera doctor [--probe]            (local install health check)")

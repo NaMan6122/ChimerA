@@ -157,12 +157,18 @@ rather than replace.
 
 ```bash
 cd ~/chimera
-chimera auth login chatgpt      # or deepseek, qwen; opens a browser once
-TRANSPORT=webapi PROVIDER=chatgpt API_PORT=8000 API_TOKEN=chimera chimera
+chimera auth login chatgpt      # or deepseek, qwen, kimi, glm; opens a browser once
+chimera up                      # start every backend you have a session for
 ```
 
-Serves in seconds, ~24 MB, no browser process. Sessions expire after days to
-weeks; `chimera auth status` tells you when.
+`chimera up` launches one gateway per provider on the first free port in
+8000–8011 and supervises them — Ctrl-C stops all of them. For a single backend
+use `chimera up kimi`, or the one-word form `chimera-kimi` (also
+`chimera-gpt`, `chimera-glm`, `chimera-deepseek`, …). Then `chimera-chat`
+discovers every one of them automatically.
+
+Serves in seconds, ~24 MB each, no browser process. Sessions expire after days
+to weeks; `chimera auth status` tells you when.
 
 ### 2. Headful — the real browser, harder to detect
 
@@ -170,8 +176,8 @@ weeks; `chimera auth status` tells you when.
 TRANSPORT=dom PROVIDER=claude chimera   # a Chromium window opens; log in once
 ```
 
-Profiles persist in `./browser_data/<provider>`. Required for `claude` and
-`kimi` today.
+Profiles persist in `./browser_data/<provider>`. Required for `claude` today;
+every other provider has a browserless transport.
 
 ### 3. Docker — nothing to install
 

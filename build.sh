@@ -73,6 +73,15 @@ for name in "${BUILT[@]}"; do
     printf '    %s -> %s\n' "$BIN/$name" "$(readlink "$BIN/$name")"
 done
 
+# One-word backend launchers: `chimera-kimi` == `chimera up kimi`. They are
+# symlinks to the gateway, which dispatches on its own argv[0].
+if [ -x "$DEST/chimera" ]; then
+    for prov in chatgpt gpt qwen deepseek kimi gemini grok glm; do
+        ln -sfn "$DEST/chimera" "$BIN/chimera-$prov"
+    done
+    printf '    %s/chimera-{chatgpt,gpt,qwen,deepseek,kimi,gemini,grok,glm} -> chimera\n' "$BIN"
+fi
+
 case ":$PATH:" in
     *":$BIN:"*) ;;
     *) echo "==> warning: $BIN is not on PATH"; echo "    export PATH=\"$BIN:\$PATH\"" ;;

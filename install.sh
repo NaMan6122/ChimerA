@@ -87,13 +87,20 @@ AFTER INSTALLING — SET UP A TRANSPORT (manually)
 
   2. Start the gateway:
 
+         chimera up                  # every backend you have a session for
+         chimera up kimi             # just one
+         chimera-kimi                # same thing, one word (chimera-gpt, …)
+
+     `chimera up` launches one gateway per provider on the first free port in
+     8000-8011 and supervises them; Ctrl-C stops all of them. `chimera-chat`
+     then discovers every backend automatically. The explicit form still
+     works when you want control:
+
          TRANSPORT=webapi PROVIDER=chatgpt API_PORT=8000 API_TOKEN=chimera chimera
 
-     Useful variations: PROVIDER=deepseek / qwen / all (one gateway behind
-     every provider, routed by model id chimera-<provider>); TRANSPORT=dom
-     for the browser substrate (a Chromium window opens — log in once, the
-     profile persists in ./browser_data); PROVIDER=claude or kimi only exist
-     on the dom substrate today. Leave API_TOKEN unset to run without auth.
+     TRANSPORT=dom drives the browser substrate instead (a Chromium window
+     opens — log in once, the profile persists in ./browser_data); `claude`
+     is dom-only today. Leave API_TOKEN unset to run without auth.
 
   3. Check it and drive it:
 
@@ -255,6 +262,11 @@ for name in chimera chimera-spin chimera-chat; do
     ln -sfn "$DEST/$name" "$PREFIX/bin/$name"
     printf '    %s -> %s\n' "$PREFIX/bin/$name" "$DEST/$name"
 done
+# One-word backend launchers: `chimera-kimi` == `chimera up kimi`.
+for prov in chatgpt gpt qwen deepseek kimi gemini grok glm; do
+    ln -sfn "$DEST/chimera" "$PREFIX/bin/chimera-$prov"
+done
+printf '    %s/chimera-{chatgpt,gpt,qwen,deepseek,kimi,gemini,grok,glm} -> chimera\n' "$PREFIX/bin"
 
 case ":$PATH:" in
     *":$PREFIX/bin:"*) ;;

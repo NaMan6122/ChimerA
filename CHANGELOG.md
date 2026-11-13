@@ -32,6 +32,17 @@ see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
   refresh token is persisted on every refresh. The DOM `kimi/` transport
   stays as the fallback.
 
+### Added — getting started
+
+- **`chimera up`** starts every backend you have a session for, one gateway
+  per provider on the first free port in 8000–8011, and supervises them
+  (Ctrl-C stops all). `chimera up <provider>` starts just one, and the
+  one-word forms `chimera-kimi`, `chimera-gpt`, `chimera-glm`, … are symlinks
+  to the gateway that dispatch on `argv[0]`. This replaces the
+  `TRANSPORT=webapi PROVIDER=… API_PORT=… chimera` incantation for the common
+  case; the explicit form still works. `chimera-chat` discovers every backend
+  automatically, so the TUI needs no configuration.
+
 ### Added — session tooling
 
 - **Vault export**: `chimera sessions export --all -o <dir>` writes one

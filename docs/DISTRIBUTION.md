@@ -44,7 +44,13 @@ layout as `./build.sh`:
 ```
 ~/.local/share/chimera/versions/v0.4.0/{chimera,chimera-spin,chimera-chat}
 ~/.local/bin/{chimera,chimera-spin,chimera-chat}  ->  versioned binaries
+~/.local/bin/chimera-{chatgpt,gpt,qwen,deepseek,kimi,gemini,grok,glm}
+                                                  ->  chimera (one-word `up`)
 ```
+
+The `chimera-<provider>` names are symlinks to the gateway, which dispatches on
+its own `argv[0]`; they are created by `install.sh` and `./build.sh`, so the
+tarball still ships exactly three binaries.
 
 Because the layout is identical, `install.sh` and `./build.sh` can upgrade over
 each other. `CHIMERA_PREFIX` relocates it; `CHIMERA_FROM_DIR=./dist` installs
