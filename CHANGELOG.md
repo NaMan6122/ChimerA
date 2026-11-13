@@ -7,6 +7,11 @@ see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
 ## [Unreleased]
 
+## [v0.4.0](https://github.com/NaMan6122/ChimerA/releases/tag/v0.4.0) — 2026-11-13
+
+Two more browserless transports (GLM and Kimi) and a one-word way to start
+them. Every provider except `claude` now runs without a browser.
+
 ### Added — providers
 
 - **Zhipu GLM browserless transport** (`chimera-glm`, internal spec 024):
