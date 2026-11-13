@@ -30,11 +30,11 @@ const (
 
 func testServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	// Real captured streams, byte-for-byte. Both fixtures came off the live
+	// Real captured streams, byte-for-byte. All three fixtures came off the live
 	// endpoint, which matters: the thinking stream is where the parser's bugs
 	// lived (fragment type THINK, bare {"v":…} continuations, new-fragment
-	// APPENDs), and a synthetic fixture would have encoded my assumptions instead
-	// of the protocol.
+	// APPENDs, and 2026-11-13's no-op-op fragments snapshot), and a synthetic
+	// fixture would have encoded my assumptions instead of the protocol.
 	fixture, err := os.ReadFile("testdata/completion_sse.txt")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -42,6 +42,12 @@ func testServer(t *testing.T) *httptest.Server {
 	thinkingFixture, err := os.ReadFile("testdata/completion_thinking_sse.txt")
 	if err != nil {
 		t.Fatalf("read thinking fixture: %v", err)
+	}
+	// The 2026-11-13 vendor shape: the fragments patch carries the complete list
+	// with no "o". Captured live off chat.deepseek.com.
+	snapshotFixture, err := os.ReadFile("testdata/completion_thinking_snapshot_sse.txt")
+	if err != nil {
+		t.Fatalf("read thinking snapshot fixture: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -81,7 +87,11 @@ func testServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flush := w.(http.Flusher)
 		if strings.Contains(body.Prompt, "think") {
-			fmt.Fprint(w, string(thinkingFixture))
+			if strings.Contains(body.Prompt, "snapshot") {
+				fmt.Fprint(w, string(snapshotFixture))
+			} else {
+				fmt.Fprint(w, string(thinkingFixture))
+			}
 			flush.Flush()
 			return
 		}
@@ -174,6 +184,39 @@ func TestSendRoutesThinkingFragments(t *testing.T) {
 	}
 	if res.Usage["total_tokens"] != float64(65) {
 		t.Fatalf("usage = %v, want total_tokens=65", res.Usage)
+	}
+}
+
+// Regression for the empty-chat replies of 2026-11-13: DeepSeek changed the
+// thinking stream so the fragments patch now arrives with NO "o" and carries
+// the complete fragment list (both THINK and RESPONSE, with their full text).
+// A parser that only matched {"o":"APPEND"} dropped the RESPONSE fragment —
+// reasoning was populated but Content was empty, so the chat showed a blank
+// reply. The fixture is that day's live capture, byte-for-byte.
+func TestSendRoutesThinkingSnapshotFragments(t *testing.T) {
+	c, srv := testClient(t)
+	defer srv.Close()
+
+	res, err := c.Send("sess-1", "", "think snapshot 2+2", true)
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if res.Content != "4" {
+		t.Fatalf("content = %q, want %q (from the no-o fragments snapshot)", res.Content, "4")
+	}
+	const wantReasoning = "We need answer briefly. 2+2=4. Must answer."
+	if res.Reasoning != wantReasoning {
+		t.Fatalf("reasoning = %q\nwant         %q", res.Reasoning, wantReasoning)
+	}
+	if res.ResponseID != "2" {
+		t.Fatalf("response id = %q, want 2", res.ResponseID)
+	}
+	if res.Status != "FINISHED" {
+		t.Fatalf("status = %q, want FINISHED", res.Status)
+	}
+	if res.Usage["total_tokens"] != float64(68) {
+		t.Fatalf("usage = %v, want total_tokens=68", res.Usage)
 	}
 }
 

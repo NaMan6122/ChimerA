@@ -216,7 +216,10 @@ type StreamResult struct {
 //
 // The answer is the opening snapshot's fragments plus every APPEND to
 // response/fragments/-1/content; reasoning is the same stream with fragment type
-// THINKING.
+// THINKING. On a thinking turn the answer can instead arrive inside a
+// {"p":"response/fragments","v":[…]} patch with no "o" — a full replacement
+// snapshot of every fragment (verified live 2026-11-13; fixture
+// completion_thinking_snapshot_sse.txt) — which replaceFragments handles.
 func (c *Client) Send(sessionID, parentID, prompt string, thinking bool) (*StreamResult, error) {
 	ch, err := c.CreatePowChallenge(CompletionPath)
 	if err != nil {
@@ -337,6 +340,15 @@ func (c *Client) Send(sessionID, parentID, prompt string, thinking bool) (*Strea
 			switch {
 			case doc.P == "response/fragments" && doc.O == "APPEND":
 				appendNewFragments(doc.V, res, &content, &reasoning, &lastFragment, start)
+			case doc.P == "response/fragments":
+				// Since 2025-11 this patch can also arrive with NO "o" — a full
+				// replacement snapshot of the fragment list (both fragments, with
+				// their complete text so far), not an append. Requiring APPEND here
+				// silently dropped the answer on every thinking turn: the THINK
+				// text still arrived via the content path (so reasoning was
+				// populated) while the RESPONSE fragment vanished, and the chat
+				// showed an empty reply. Fixture: completion_thinking_snapshot_sse.txt.
+				replaceFragments(doc.V, res, &content, &reasoning, &lastFragment, start)
 			case doc.P == "response" && doc.O == "BATCH":
 				applyBatch(doc.V, res)
 			case doc.P == "response/status" && doc.O == "SET":
@@ -440,6 +452,26 @@ func appendNewFragments(raw json.RawMessage, res *StreamResult, content, reasoni
 	for _, f := range frags {
 		*fragType = f.Type
 		appendText(f.Content, res, content, reasoning, *fragType, start)
+	}
+}
+
+// replaceFragments handles {"p":"response/fragments","v":[…]} with no "o": the
+// vendor's current shape, where the array is the complete fragment list rather
+// than an increment. Rebuild both builders from it (the list is authoritative —
+// it repeats everything streamed so far), then leave the type on the last
+// fragment so later appends keep routing to the answer.
+func replaceFragments(raw json.RawMessage, res *StreamResult, content, reasoning *strings.Builder, fragType *string, start time.Time) {
+	var frags []fragment
+	if json.Unmarshal(raw, &frags) != nil {
+		return
+	}
+	content.Reset()
+	reasoning.Reset()
+	for _, f := range frags {
+		appendText(f.Content, res, content, reasoning, f.Type, start)
+	}
+	if len(frags) > 0 {
+		*fragType = frags[len(frags)-1].Type
 	}
 }
 

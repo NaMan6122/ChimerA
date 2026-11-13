@@ -1,0 +1,53 @@
+event: ready
+data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}
+
+event: update_session
+data: {"updated_at":1794553904.6017978}
+
+data: {"v":{"response":{"message_id":2,"parent_id":1,"model":"","role":"ASSISTANT","thinking_enabled":true,"ban_edit":false,"ban_regenerate":false,"status":"WIP","incomplete_message":null,"accumulated_token_usage":0,"feedback":null,"inserted_at":1794553904.5858438,"search_enabled":false,"fragments":[{"id":2,"type":"THINK","content":"We","elapsed_secs":null,"references":[],"stage_id":1}],"conversation_mode":"DEFAULT","has_pending_fragment":false,"auto_continue":false,"search_triggered":false,"extra_search_providers":[]}}}
+
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":" need"}
+
+data: {"v":" answer"}
+
+data: {"v":" briefly"}
+
+data: {"v":"."}
+
+data: {"v":" "}
+
+data: {"v":"2"}
+
+data: {"v":"+"}
+
+data: {"v":"2"}
+
+data: {"v":"="}
+
+data: {"v":"4"}
+
+data: {"v":"."}
+
+data: {"v":" Must"}
+
+data: {"v":" answer"}
+
+data: {"v":"."}
+
+data: {"p":"response/fragments/-1/elapsed_secs","o":"SET","v":0.596242879}
+
+data: {"p":"response/fragments","v":[{"id":2,"type":"THINK","content":"We need answer briefly. 2+2=4. Must answer.","elapsed_secs":0.596242879,"references":[],"stage_id":1},{"id":3,"type":"RESPONSE","content":"4","references":[],"stage_id":1}]}
+
+data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":68},{"p":"quasi_status","v":"FINISHED"}]}
+
+data: {"p":"response/status","o":"SET","v":"FINISHED"}
+
+event: update_session
+data: {"updated_at":1794553904.849674}
+
+event: title
+data: {"content":"Simple arithmetic"}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+

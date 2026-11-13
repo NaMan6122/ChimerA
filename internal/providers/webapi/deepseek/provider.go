@@ -141,8 +141,12 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 	}
 
 	// A successful-but-empty turn is the same fault one step later: the call is
-	// accepted, nothing comes back. Retry once from a fresh conversation.
-	if strings.TrimSpace(res.Content) == "" && conv.parentID != "" {
+	// accepted, nothing comes back. Retry once from a fresh conversation — even
+	// on a conversation's first turn, which the old parentID guard skipped — and
+	// if the retry is empty too, fail loudly: a blank reply is indistinguishable
+	// from a hang and hides the fault (the 2026-11-13 parser break looked exactly
+	// like this from the chat UI).
+	if strings.TrimSpace(res.Content) == "" {
 		p.log.Warnf("deepseek returned an empty turn; retrying on a fresh chat")
 		if fresh, cerr := p.client.CreateChatSession(); cerr == nil {
 			if retry, rerr := p.client.Send(fresh, "", text, p.cfg.DeepSeekWebThinking); rerr == nil && strings.TrimSpace(retry.Content) != "" {
@@ -150,6 +154,9 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 				res = retry
 			}
 		}
+	}
+	if strings.TrimSpace(res.Content) == "" {
+		return nil, fmt.Errorf("deepseek returned an empty response (thinking=%t; set DEEPSEEK_SSE_DUMP to capture the wire)", p.cfg.DeepSeekWebThinking)
 	}
 
 	p.mu.Lock()
