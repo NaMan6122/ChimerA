@@ -17,6 +17,10 @@ see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
   no-history invariant holds without transcript folding. `GLM_WEB_MODEL`
   selects the assistant (`auto`, `deepresearch`, or a raw 24-char
   assistant id); reasoning is parsed and counted, never persisted.
+  A self-heal that abandons a conversation deletes the orphan server-side
+  (off the response path, best-effort) so the account's history list stays
+  clean; the delete's `status` envelope is honoured, since chatglm.cn
+  reports a failed delete as HTTP 200.
 
 ### Added — session tooling
 

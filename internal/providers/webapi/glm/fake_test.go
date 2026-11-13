@@ -38,6 +38,12 @@ func newFakeGLMServer(t *testing.T, fake *fakeGLM) *httptest.Server {
 		if b, err := json.Marshal(body); err == nil {
 			fake.seenBodies = append(fake.seenBodies, string(b))
 		}
+		// A continuation with the poisoned id fails, forcing the provider's
+		// self-heal onto a fresh conversation.
+		if conv, _ := body["conversation_id"].(string); conv == "poison" {
+			http.Error(w, `{"status":1,"message":"conversation gone"}`, http.StatusInternalServerError)
+			return
+		}
 		raw, err := os.ReadFile("testdata/turn1.sse")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -45,6 +51,22 @@ func newFakeGLMServer(t *testing.T, fake *fakeGLM) *httptest.Server {
 		}
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		_, _ = w.Write(raw)
+	})
+
+	mux.HandleFunc("/chatglm/backend-api/assistant/conversation/delete", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ConversationID string `json:"conversation_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		fake.recordDelete(body.ConversationID)
+		w.Header().Set("Content-Type", "application/json")
+		// Live shape: a repeat delete answers HTTP 200 with status:1
+		// "删除失败" — the envelope, not the status code, is the verdict.
+		if !fake.firstDelete(body.ConversationID) {
+			fmt.Fprint(w, `{"status":1,"message":"删除失败","result":[]}`)
+			return
+		}
+		fmt.Fprint(w, `{"status":0,"message":"success","result":[]}`)
 	})
 
 	return httptest.NewServer(mux)

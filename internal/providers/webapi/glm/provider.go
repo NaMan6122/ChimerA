@@ -104,6 +104,17 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 		return nil, err
 	}
 
+	// Hygiene: if this turn replaced a conversation (the self-heal path), the
+	// old one is orphaned server-side — delete it off the response path. A
+	// failed delete only leaves one entry in the account's history list.
+	if orphaned := convID; orphaned != "" && res.ConversationID != "" && orphaned != res.ConversationID {
+		go func(id string) {
+			if err := p.client.DeleteConversation(id); err != nil {
+				p.log.Warnf("conversation hygiene failed for %s: %v", shortID(id), err)
+			}
+		}(orphaned)
+	}
+
 	p.mu.Lock()
 	p.convs[threadID] = res.ConversationID
 	p.mu.Unlock()

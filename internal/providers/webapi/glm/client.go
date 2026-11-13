@@ -241,6 +241,51 @@ func (c *Client) Refresh() error {
 	return nil
 }
 
+// DeleteConversation removes one conversation from the account's history list
+// (spec 024 hygiene). It is a SOFT delete: the data survives and the id stays
+// continuable, so this is a history-cleanup primitive, not a data-destruction
+// one. Best-effort by design — a failed delete only means the history list
+// keeps one entry.
+func (c *Client) DeleteConversation(conversationID string) error {
+	if conversationID == "" {
+		return nil
+	}
+	if err := c.Refresh(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	access := c.access
+	c.mu.Unlock()
+	assistantID, _ := c.assistantAndMode()
+	body, _ := json.Marshal(map[string]any{
+		"assistant_id":    assistantID,
+		"conversation_id": conversationID,
+	})
+	resp, err := c.do(http.MethodPost, c.base()+"/chatglm/backend-api/assistant/conversation/delete", access, string(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return &webapi.HTTPError{Status: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
+	}
+	// The envelope, not the status code, carries the verdict: deleting an
+	// already-gone conversation answers HTTP 200 with status:1 "删除失败".
+	// Ignoring it would report a leaked history entry as a clean delete.
+	var wrap struct {
+		Status  int    `json:"status"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &wrap); err != nil {
+		return fmt.Errorf("glm conversation/delete decode: %w", err)
+	}
+	if wrap.Status != 0 {
+		return fmt.Errorf("glm conversation/delete rejected: status=%d message=%q", wrap.Status, wrap.Message)
+	}
+	return nil
+}
+
 // Send performs one conversation turn. conversationID may be empty (new
 // conversation); the response always carries the id to reuse.
 func (c *Client) Send(text, conversationID string) (*TurnResult, error) {

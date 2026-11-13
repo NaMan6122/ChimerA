@@ -12,13 +12,14 @@ import (
 	"crypto/md5"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/chimera/chimera/internal/config"
-	"github.com/chimera/chimera/internal/models"
 	"github.com/chimera/chimera/internal/providers/webapi"
 )
 
@@ -119,6 +120,43 @@ type fakeGLM struct {
 	seenSigns   []string
 	seenBodies  []string
 	refreshHits int
+
+	// deleted needs its own lock: the provider deletes off the response
+	// path, so the write lands in a detached goroutine with no round-trip
+	// ordering against the test's poll. The fields above are only read
+	// after a completed request, which the netpoller orders for us.
+	mu      sync.Mutex
+	deleted []string
+	gone    map[string]bool
+}
+
+// recordDelete captures one conversation/delete call.
+func (f *fakeGLM) recordDelete(id string) {
+	f.mu.Lock()
+	f.deleted = append(f.deleted, id)
+	f.mu.Unlock()
+}
+
+// firstDelete reports whether this is the first delete of id — the live
+// server answers a repeat with status:1.
+func (f *fakeGLM) firstDelete(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.gone == nil {
+		f.gone = map[string]bool{}
+	}
+	if f.gone[id] {
+		return false
+	}
+	f.gone[id] = true
+	return true
+}
+
+// deletedIDs snapshots the deletions seen so far.
+func (f *fakeGLM) deletedIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.deleted)
 }
 
 func TestProviderEndToEnd(t *testing.T) {
@@ -211,5 +249,27 @@ func TestProviderEndToEnd(t *testing.T) {
 	if !ok || err != nil {
 		t.Errorf("IsLoggedIn = %v, %v", ok, err)
 	}
-	var _ models.ProviderResponse // shape check
+
+	// Hygiene: a poisoned continuation pointer self-heals onto a fresh
+	// conversation and the orphaned one gets deleted off the response path.
+	p.mu.Lock()
+	p.convs["thread-2"] = "poison"
+	p.mu.Unlock()
+	if _, err := p.SendMessage("again", "thread-2"); err != nil {
+		t.Fatalf("self-heal turn: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(fake.deletedIDs()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond) // deletion runs off the response path
+	}
+	if got := fake.deletedIDs(); !slices.Contains(got, "poison") {
+		t.Errorf("orphaned conversations deleted = %v, want [poison]", got)
+	}
+
+	// The envelope is the verdict: a repeat delete answers HTTP 200 with
+	// status:1, and reporting that as success would hide a leaked history
+	// entry (live finding, 2026-11-13).
+	if err := p.client.DeleteConversation("poison"); err == nil {
+		t.Error("repeat delete returned nil — status:1 in an HTTP 200 envelope must be an error")
+	}
 }
