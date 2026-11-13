@@ -7,6 +7,17 @@ see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
 ## [Unreleased]
 
+### Added — providers
+
+- **Zhipu GLM browserless transport** (`chimera-glm`, internal spec 024):
+  replays chatglm.cn's web API with refresh-token custody and one MD5
+  header-signature (static public secret — no PoW, no VM). Live-verified at
+  spike level before implementation; the parser is tested against the
+  captured fixtures. Native server-side `conversation_id` continuity — the
+  no-history invariant holds without transcript folding. `GLM_WEB_MODEL`
+  selects the assistant (`auto`, `deepresearch`, or a raw 24-char
+  assistant id); reasoning is parsed and counted, never persisted.
+
 ### Added — session tooling
 
 - **Vault export**: `chimera sessions export --all -o <dir>` writes one

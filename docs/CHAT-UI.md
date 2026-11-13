@@ -98,6 +98,7 @@ Browserless coverage as of this writing, checked against the source:
 | Qwen | `chimera-qwen` | ⚠️ captcha-blocked — [README known issues](../README.md#known-issues) |
 | Claude, Kimi | `chimera-claude`, `chimera-kimi` | — DOM transport only |
 | Grok | `chimera-grok` | ✅ live-verified (cookie custody; model side is stateless — see the README matrix note) |
+| GLM (Zhipu) | `chimera-glm` | ✅ live-verified (internal spec 024; refresh-token custody + MD5 header-signature, native conversation continuity) |
 
 A UI that hardcodes its own model names still works: unknown `model` values
 are accepted and routed to the active provider

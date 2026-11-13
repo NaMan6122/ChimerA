@@ -23,6 +23,7 @@ const (
 	ProviderKimi     = "kimi"
 	ProviderGemini   = "gemini"
 	ProviderGrok     = "grok"
+	ProviderGLM      = "glm"
 	ProviderAll      = "all"
 )
 
@@ -35,6 +36,7 @@ var SupportedProviders = []string{
 	ProviderKimi,
 	ProviderGemini,
 	ProviderGrok,
+	ProviderGLM,
 	ProviderAll,
 }
 
@@ -82,6 +84,12 @@ type Config struct {
 	// WebAPI model selection for the grok transport (spec 014, internal).
 	GrokWebModel string
 
+	// WebAPI model selection for the glm transport (spec 024): "auto" or
+	// anything without a keyword → default assistant in thinking mode;
+	// contains "think"/"zero" → thinking; "deepresearch" → deep research;
+	// a 24+ char id selects the assistant directly.
+	GLMWebModel string
+
 	// Provider URLs
 	ChatGPTURL  string
 	ClaudeURL   string
@@ -90,6 +98,7 @@ type Config struct {
 	KimiURL     string
 	GeminiURL   string
 	GrokURL     string
+	GLMURL      string
 
 	// Timeouts
 	ResponseTimeout time.Duration
@@ -172,6 +181,8 @@ func Load() (*Config, error) {
 
 		GrokWebModel: getEnvStr("GROK_WEB_MODEL", "auto"),
 
+		GLMWebModel: getEnvStr("GLM_WEB_MODEL", "auto"),
+
 		// Provider URLs
 		ChatGPTURL:  getEnvStr("CHATGPT_URL", "https://chatgpt.com"),
 		ClaudeURL:   getEnvStr("CLAUDE_URL", "https://claude.ai"),
@@ -180,6 +191,7 @@ func Load() (*Config, error) {
 		KimiURL:     getEnvStr("KIMI_URL", "https://www.kimi.com"),
 		GeminiURL:   getEnvStr("GEMINI_URL", "https://gemini.google.com"),
 		GrokURL:     getEnvStr("GROK_URL", "https://grok.com"),
+		GLMURL:      getEnvStr("GLM_URL", "https://chatglm.cn"),
 
 		// Timeouts
 		ResponseTimeout: time.Duration(getEnvInt("RESPONSE_TIMEOUT", 120000)) * time.Millisecond,
@@ -304,6 +316,7 @@ func (c *Config) ProviderURLs() map[string]string {
 		ProviderKimi:     c.KimiURL,
 		ProviderGemini:   c.GeminiURL,
 		ProviderGrok:     c.GrokURL,
+		ProviderGLM:      c.GLMURL,
 	}
 }
 
@@ -333,6 +346,7 @@ var webAPIProviders = map[string]bool{
 	ProviderChatGPT:  true,
 	ProviderGemini:   true,
 	ProviderGrok:     true,
+	ProviderGLM:      true,
 }
 
 // UseWebAPI reports whether the browserless transport should be used for the
