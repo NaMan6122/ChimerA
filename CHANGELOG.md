@@ -5,7 +5,7 @@ All notable changes to Chimera are documented here. Format follows
 their GitHub releases. Cutting a release includes updating this file —
 see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
-## [Unreleased]
+## [v0.3.0](https://github.com/NaMan6122/ChimerA/releases/tag/v0.3.0) — 2026-11-13
 
 ### Added — agent hardening (SWE readiness)
 
