@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/chimera/chimera/internal/sessions"
 	"github.com/chimera/chimera/internal/spin"
 )
 
@@ -115,6 +117,17 @@ type model struct {
 type backendsMsg struct {
 	list   []backend
 	target string
+}
+
+// sessionsListMsg carries the recent-session listing for the /sessions picker.
+type sessionsListMsg struct{ list []*sessions.Summary }
+
+// sessionLoadedMsg carries one transcript read off disk for a display-only
+// restore.
+type sessionLoadedMsg struct {
+	id   string
+	recs []spin.Record
+	err  error
 }
 
 func main() {
@@ -298,6 +311,37 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autoScroll = m.viewport.AtBottom()
 		return m, cmd
 
+	case sessionsListMsg:
+		if m.palMode == palSessions {
+			m.palLoading = false
+			m.palItems = nil
+			for _, s := range msg.list {
+				m.palItems = append(m.palItems, palItem{
+					label: s.ID,
+					desc:  fmt.Sprintf("%s · %d rounds · %s", s.Started.Format("2006-01-02 15:04"), s.Rounds, clipTask(s.Task, 34)),
+					sess:  s,
+				})
+			}
+			if len(m.palItems) == 0 {
+				m.palItems = []palItem{{label: "(none)", desc: "nothing preserved in " + m.sessionsDir}}
+			}
+			m.palIndex = 0
+			m.layout()
+		}
+		return m, nil
+
+	case sessionLoadedMsg:
+		if msg.err != nil {
+			m.append(kindError, msg.err.Error())
+		} else if len(msg.recs) == 0 {
+			m.append(kindNotice, "session "+short(msg.id)+" has an empty transcript")
+		} else {
+			m.restore(msg.recs)
+			m.append(kindNotice, "viewing session "+short(msg.id)+" — display only; your next message goes to the current conversation")
+		}
+		m.refreshViewport()
+		return m, nil
+
 	case backendsMsg:
 		if msg.target == "__picker__" {
 			m.palLoading = false
@@ -454,6 +498,10 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 		m.append(kindNotice, "new session "+short(m.client.Session)+" — the next message starts a fresh upstream conversation")
 		m.refreshViewport()
 		return m, nil
+	case "/sessions":
+		// Bare /sessions opens the picker rather than printing usage, like /use.
+		m.input.SetValue("/sessions")
+		return m, m.openSessionPicker()
 	case "/transcript":
 		if m.rec == nil {
 			m.append(kindNotice, "transcript recording is off (-no-save)")
@@ -470,6 +518,7 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 			"/new             new conversation on the current backend",
 			"/status          current backend, model, session, workspace",
 			"/transcript      where this session is being saved on disk",
+			"/sessions        pick a preserved session to view (display only)",
 		}, "\n"))
 		m.refreshViewport()
 		return m, nil
@@ -484,6 +533,14 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if strings.HasPrefix(task, "/sessions ") {
+		id := strings.TrimSpace(strings.TrimPrefix(task, "/sessions "))
+		dir := m.sessionsDir
+		return m, func() tea.Msg {
+			recs, err := spin.LoadTranscript(dir, id)
+			return sessionLoadedMsg{id: id, recs: recs, err: err}
+		}
+	}
 	if strings.HasPrefix(task, "/use ") {
 		target := strings.TrimSpace(strings.TrimPrefix(task, "/use "))
 		m.append(kindNotice, "looking for "+target+"…")
@@ -553,6 +610,56 @@ func (m *model) restore(recs []spin.Record) {
 		m.append(kindNotice, fmt.Sprintf("restored %d message(s) from this session's transcript — shown for context, not sent to the model", shown))
 	}
 	m.refreshViewport()
+}
+
+// recentSessions lists up to n preserved sessions, newest first. It reads
+// only the n most recently modified transcripts, so browsing stays cheap on
+// a large archive.
+func recentSessions(dir string, n int) []*sessions.Summary {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var jsonls []os.DirEntry
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			jsonls = append(jsonls, e)
+		}
+	}
+	modTime := func(e os.DirEntry) time.Time {
+		info, err := e.Info()
+		if err != nil {
+			return time.Time{}
+		}
+		return info.ModTime()
+	}
+	sort.Slice(jsonls, func(i, j int) bool { return modTime(jsonls[i]).After(modTime(jsonls[j])) })
+	if len(jsonls) > n {
+		jsonls = jsonls[:n]
+	}
+	var out []*sessions.Summary
+	for _, e := range jsonls {
+		s, err := sessions.LoadSummary(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue // unreadable transcript: skip, the listing survives
+		}
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Started.After(out[j].Started) })
+	return out
+}
+
+// clipTask shortens a session's task line for the picker rows.
+func clipTask(s string, maxRunes int) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + "…"
 }
 
 // rotateTranscript starts a new transcript file after /new or /use.

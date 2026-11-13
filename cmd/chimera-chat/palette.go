@@ -6,6 +6,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/chimera/chimera/internal/sessions"
+	"github.com/chimera/chimera/internal/spin"
 )
 
 // paletteMode says which popup, if any, is open above the input.
@@ -15,14 +18,17 @@ const (
 	palNone paletteMode = iota
 	palCommands
 	palBackends
+	palSessions
 )
 
-// palItem is one selectable row. Commands fill cmd; backends fill be.
+// palItem is one selectable row. Commands fill cmd; backends fill be;
+// sessions fill sess.
 type palItem struct {
 	label string
 	desc  string
 	cmd   string
 	be    backend
+	sess  *sessions.Summary
 }
 
 // slashCommands is the hint list: typing "/" shows these, filtered as you type.
@@ -30,6 +36,7 @@ var slashCommands = []palItem{
 	{label: "/use", desc: "switch backend (chatgpt, deepseek, qwen…)", cmd: "/use"},
 	{label: "/backends", desc: "list live gateways", cmd: "/backends"},
 	{label: "/new", desc: "new conversation on this backend", cmd: "/new"},
+	{label: "/sessions", desc: "view a past session (display only)", cmd: "/sessions"},
 	{label: "/status", desc: "backend · model · session", cmd: "/status"},
 	{label: "/help", desc: "all commands and keys", cmd: "/help"},
 	{label: "/quit", desc: "exit", cmd: "/quit"},
@@ -66,7 +73,14 @@ func (m *model) syncPalette() {
 		}
 		return
 	}
-	if m.palMode == palBackends {
+	// "/sessions" (bare or with a trailing space) is the session picker.
+	if value == "/sessions" || strings.HasPrefix(value, "/sessions ") {
+		if m.palMode != palSessions {
+			m.openSessionPicker()
+		}
+		return
+	}
+	if m.palMode == palBackends || m.palMode == palSessions {
 		m.closePalette()
 	}
 
@@ -100,6 +114,18 @@ func (m *model) openBackendPicker() tea.Cmd {
 	m.palIndex = 0
 	m.layout()
 	return m.scan("__picker__")
+}
+
+// openSessionPicker shows preserved sessions to view (display only). Listing
+// is async: a large archive must not freeze the input loop.
+func (m *model) openSessionPicker() tea.Cmd {
+	m.palMode = palSessions
+	m.palLoading = true
+	m.palItems = nil
+	m.palIndex = 0
+	m.layout()
+	list := m.sessionsDir
+	return func() tea.Msg { return sessionsListMsg{list: recentSessions(list, 15)} }
 }
 
 func (m *model) movePal(delta int) {
@@ -140,6 +166,20 @@ func (m *model) applyPal() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.palMode == palSessions {
+		if item.sess == nil {
+			return m, nil // "(no sessions)" placeholder
+		}
+		id := item.sess.ID
+		m.input.Reset()
+		m.closePalette()
+		dir := m.sessionsDir
+		return m, func() tea.Msg {
+			recs, err := spin.LoadTranscript(dir, id)
+			return sessionLoadedMsg{id: id, recs: recs, err: err}
+		}
+	}
+
 	m.closePalette()
 	m.input.SetValue(item.cmd)
 	if item.cmd == "/use" {
@@ -158,6 +198,9 @@ func (m *model) paletteView() string {
 	title := "commands"
 	if m.palMode == palBackends {
 		title = "backends"
+	}
+	if m.palMode == palSessions {
+		title = "sessions — enter to view, display only"
 	}
 
 	width := m.width - 4
