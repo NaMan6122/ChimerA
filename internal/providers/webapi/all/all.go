@@ -9,5 +9,6 @@ import (
 	_ "github.com/chimera/chimera/internal/providers/webapi/gemini"
 	_ "github.com/chimera/chimera/internal/providers/webapi/glm"
 	_ "github.com/chimera/chimera/internal/providers/webapi/grok"
+	_ "github.com/chimera/chimera/internal/providers/webapi/kimi"
 	_ "github.com/chimera/chimera/internal/providers/webapi/qwen"
 )

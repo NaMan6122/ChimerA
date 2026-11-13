@@ -22,6 +22,16 @@ see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
   clean; the delete's `status` envelope is honoured, since chatglm.cn
   reports a failed delete as HTTP 200.
 
+- **Kimi browserless transport** (`chimera-kimi`, internal spec 025):
+  replays kimi.ai's Connect-protocol chat API with refresh-token custody —
+  no signature, no proof-of-work, no JS challenge, only account
+  rate-limiting. Events are `op`-driven (`set` replaces, `append` appends),
+  the turn ends on `{"done":{}}`, and continuity is native
+  (`chat_id` + `parent_id`), so the no-history invariant holds without
+  transcript folding. `KIMI_WEB_MODEL` selects the model; the rotated
+  refresh token is persisted on every refresh. The DOM `kimi/` transport
+  stays as the fallback.
+
 ### Added — session tooling
 
 - **Vault export**: `chimera sessions export --all -o <dir>` writes one

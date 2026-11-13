@@ -90,6 +90,14 @@ type Config struct {
 	// a 24+ char id selects the assistant directly.
 	GLMWebModel string
 
+	// WebAPI model selection for the kimi transport (spec 025): "auto" uses
+	// the account default.
+	KimiWebModel string
+	// KimiWebURL is the kimi web API origin. It is separate from KimiURL
+	// because the exported credential is scoped to kimi.ai (the JWT's aud),
+	// while the DOM transport still drives kimi.com.
+	KimiWebURL string
+
 	// Provider URLs
 	ChatGPTURL  string
 	ClaudeURL   string
@@ -182,6 +190,9 @@ func Load() (*Config, error) {
 		GrokWebModel: getEnvStr("GROK_WEB_MODEL", "auto"),
 
 		GLMWebModel: getEnvStr("GLM_WEB_MODEL", "auto"),
+
+		KimiWebModel: getEnvStr("KIMI_WEB_MODEL", "auto"),
+		KimiWebURL:   getEnvStr("KIMI_WEB_URL", "https://www.kimi.ai"),
 
 		// Provider URLs
 		ChatGPTURL:  getEnvStr("CHATGPT_URL", "https://chatgpt.com"),
@@ -347,6 +358,7 @@ var webAPIProviders = map[string]bool{
 	ProviderGemini:   true,
 	ProviderGrok:     true,
 	ProviderGLM:      true,
+	ProviderKimi:     true,
 }
 
 // UseWebAPI reports whether the browserless transport should be used for the
