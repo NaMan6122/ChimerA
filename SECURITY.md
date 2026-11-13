@@ -38,3 +38,29 @@ case. Credit is given unless you prefer anonymity.
   protection is enabled as a backstop, not a substitute for care.
 - `chimera auth import` validates material before installing it; do not
   bypass it with hand-written session files.
+
+## The harness tool surface (chimera-spin / chimera-chat)
+
+The agent loop executes tools with your local privileges. That is the
+feature — an agent that cannot run `go test` is a toy — but the trust
+boundary deserves stating plainly:
+
+- `run_command` and `monitor start` execute **arbitrary `bash -lc`** with no
+  allowlist. They are confined to the workspace only by convention (`cmd.Dir`);
+  shell commands can reach anywhere your user can. Treat a spin's `-root` as
+  advisory scoping, not isolation.
+- `-safe` applies an **advisory denylist** (privilege escalation, power
+  control, device overwrite, root-recursive delete, pipe-to-shell, fork
+  bombs) to both. It is hardening, not a sandbox — do not run an untrusted
+  task with `-safe` and assume containment.
+- File tools (`read_file`, `write_file`, `edit_file`, `read_pdf`, `grep`,
+  `list_dir`, `git`) resolve **symlinks** before confinement checks, so a
+  link planted inside the root cannot point a tool outside it.
+- `monitor` logs land in a per-run temp directory (`$TMPDIR/chimera-monitors-*`),
+  never inside the workspace; they live until the OS cleans them.
+- Session transcripts (`sessions/`) and context ledgers (`ledgers/`) stay on
+  the local disk and are never sent upstream — prompts reach only the vendor
+  you logged into, which is the core promise.
+- MCP-spawned spins inherit all of this; if you expose the MCP server to a
+  client you do not fully trust, scope its workspace with `-root`/`AUTH_DIR`
+  accordingly (see spec 021).

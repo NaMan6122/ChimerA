@@ -119,7 +119,17 @@ func (r *Recorder) Observe(ev Event) {
 	case EventFinal:
 		r.append(Record{Kind: "final", Round: ev.Round, Text: ev.Text})
 	case EventNudge:
-		r.Note("note", "answered without reading anything; asked for evidence")
+		text := ev.Text
+		if text == "" {
+			text = "answered without reading anything; asked for evidence"
+		}
+		r.Note("note", text)
+	case EventCompact:
+		text := ev.Text
+		if text == "" {
+			text = "context compacted; upstream session rotated"
+		}
+		r.Note("note", text)
 	}
 }
 

@@ -100,6 +100,12 @@ type model struct {
 	sessionsDir string
 	rec         *spin.Recorder
 
+	// tools lives for the whole TUI session so background monitors survive
+	// across messages and backend switches; ledger follows the harness-side
+	// session (one per /new).
+	tools  *spin.Executor
+	ledger *spin.Ledger
+
 	// Footer animation phase.
 	phase int
 }
@@ -123,7 +129,7 @@ func main() {
 	flag.StringVar(&modelID, "model", "chimera-chatgpt", "model id")
 	flag.StringVar(&session, "session", "", "session id (default: a fresh one)")
 	flag.StringVar(&root, "root", ".", "workspace root the tools are confined to")
-	flag.IntVar(&maxRounds, "max-rounds", 8, "hard stop on tool rounds per message")
+	flag.IntVar(&maxRounds, "max-rounds", 16, "hard stop on tool rounds per message")
 	flag.StringVar(&sessionsDir, "sessions-dir", spin.DefaultSessionsDir(), "where session transcripts are saved")
 	var noSave bool
 	flag.BoolVar(&noSave, "no-save", false, "do not write a session transcript")
@@ -444,6 +450,7 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 		m.client.NewSession(fmt.Sprintf("chat-%d", time.Now().UnixNano()))
 		m.client.Refresh()
 		m.rotateTranscript()
+		m.ledger = nil // the ledger belongs to the harness-side session
 		m.append(kindNotice, "new session "+short(m.client.Session)+" — the next message starts a fresh upstream conversation")
 		m.refreshViewport()
 		return m, nil
@@ -505,7 +512,14 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 // rewire (re)builds the runner and points its events at this model. Called on
 // start and after every /use.
 func (m *model) rewire() {
-	m.runner = spin.NewRunner(m.client, &spin.Executor{Root: m.root}, m.maxRounds)
+	if m.tools == nil {
+		m.tools = &spin.Executor{Root: m.root}
+	}
+	if m.ledger == nil {
+		m.ledger = spin.NewLedger(m.sessionsDir, m.client.Session)
+	}
+	m.runner = spin.NewRunner(m.client, m.tools, m.maxRounds)
+	m.runner.Ledger = m.ledger
 	m.runner.OnEvent = func(ev spin.Event) {
 		if m.rec != nil {
 			m.rec.Observe(ev) // transcript only; never feeds the loop
@@ -599,7 +613,17 @@ func (m *model) handle(ev spin.Event) {
 		m.rounds++
 		m.append(kindRound, fmt.Sprintf("round %d · %s · %.1fs", ev.Round, human(ev.PromptChars), ev.Latency.Seconds()))
 	case spin.EventNudge:
-		m.append(kindNotice, "answered without reading anything — asking for evidence")
+		text := ev.Text
+		if text == "" {
+			text = "answered without reading anything — asking for evidence"
+		}
+		m.append(kindNotice, text)
+	case spin.EventCompact:
+		text := ev.Text
+		if text == "" {
+			text = "context compacted — fresh upstream session"
+		}
+		m.append(kindNotice, text)
 	case spin.EventTool:
 		m.append(kindTool, "⚙ "+spin.Describe(ev.Tool))
 	case spin.EventResult:

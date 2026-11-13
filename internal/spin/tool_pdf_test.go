@@ -106,7 +106,15 @@ func TestReadPDFPageFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fake did not record argv: %v", err)
 	}
-	want := "-layout\n-f\n2\n-l\n5\n" + filepath.Join(root, "doc.pdf") + "\n-\n"
+	// Resolve returns the symlink-resolved real path (spec-021 hardening), so
+	// the expectation is resolved too — on macOS t.TempDir() lives under a
+	// symlinked /var. The doc itself need not exist (fake pdftotext), so
+	// resolve the directory, as the deepest-existing-ancestor rule does.
+	real, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "-layout\n-f\n2\n-l\n5\n" + filepath.Join(real, "doc.pdf") + "\n-\n"
 	if string(raw) != want {
 		t.Errorf("argv = %q, want %q", raw, want)
 	}
@@ -116,7 +124,7 @@ func TestReadPDFPageFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fake did not record argv: %v", err)
 	}
-	want = "-layout\n" + filepath.Join(root, "doc.pdf") + "\n-\n"
+	want = "-layout\n" + filepath.Join(real, "doc.pdf") + "\n-\n"
 	if string(raw) != want {
 		t.Errorf("argv without pages = %q, want %q", raw, want)
 	}

@@ -27,8 +27,9 @@ func main() {
 		sessionsDir, tags                                           string
 		models                                                      string
 		maxRounds                                                   int
-		timeout                                                     time.Duration
-		showVersion, noSave                                         bool
+		timeout, cmdTimeout                                         time.Duration
+		compactChars                                                int
+		safe, showVersion, noSave                                   bool
 	)
 	flag.StringVar(&baseURL, "base-url", envOr("CHIMERA_BASE_URL", "http://localhost:8000/v1"), "gateway base URL")
 	flag.StringVar(&token, "token", envOr("CHIMERA_API_KEY", "chimera"), "bearer token")
@@ -36,7 +37,10 @@ func main() {
 	flag.StringVar(&models, "models", "", `comma-separated model ids to run the task once per model, in order (e.g. chimera-gemini,chimera-grok); overrides -model; one combined report on stdout`)
 	flag.StringVar(&session, "session", "", "session id (default: a fresh one per run)")
 	flag.StringVar(&root, "root", ".", "workspace root the tools are confined to")
-	flag.IntVar(&maxRounds, "max-rounds", 8, "hard stop on tool rounds")
+	flag.IntVar(&maxRounds, "max-rounds", 16, "hard stop on tool rounds")
+	flag.DurationVar(&cmdTimeout, "cmd-timeout", 5*time.Minute, "per-command limit for run_command and git")
+	flag.BoolVar(&safe, "safe", false, "apply the advisory denylist to run_command and monitor (hardening, not a sandbox)")
+	flag.IntVar(&compactChars, "compact-chars", spin.DefaultCompactChars, "estimated upstream chars that trigger compaction into a fresh provider session (negative disables)")
 	flag.DurationVar(&timeout, "timeout", 180*time.Second, "per-turn HTTP timeout")
 	flag.StringVar(&jsonOut, "json", "", "write a run report as JSON")
 	flag.StringVar(&task, "task", "", "task for the agent (or pass it as the last argument)")
@@ -124,13 +128,30 @@ func main() {
 		}
 	}
 
-	runner := spin.NewRunner(client, &spin.Executor{Root: absRoot}, maxRounds)
+	var ledger *spin.Ledger
+	if !noSave {
+		ledger = spin.NewLedger(sessionsDir, session)
+		defer ledger.Close()
+	}
+	tools := &spin.Executor{Root: absRoot, CommandTimeout: cmdTimeout, Safe: safe}
+	defer tools.Shutdown()
+
+	runner := spin.NewRunner(client, tools, maxRounds)
+	runner.Ledger = ledger
+	runner.CompactChars = compactChars
 	runner.OnEvent = func(ev spin.Event) {
 		if rec != nil {
 			rec.Observe(ev)
 		}
-		if ev.Kind == spin.EventNudge {
+		switch ev.Kind {
+		case spin.EventNudge:
+			if ev.Text != "" {
+				fmt.Fprintln(os.Stderr, "[spin]", ev.Text)
+				return
+			}
 			fmt.Fprintln(os.Stderr, "[spin] no tool calls on a repo question — asking for evidence")
+		case spin.EventCompact:
+			fmt.Fprintln(os.Stderr, "[spin]", ev.Text)
 		}
 	}
 

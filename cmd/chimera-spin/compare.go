@@ -53,6 +53,9 @@ type compareRun struct {
 	timeout     time.Duration
 	sessionsDir string
 	tags        []string
+	cmdTimeout  time.Duration
+	safe        bool
+	compact     int
 	noSave      bool
 	jsonOut     string
 	task        string
@@ -125,13 +128,23 @@ func runOneModel(cfg compareRun, model string) modelOutcome {
 		}
 	}
 
-	runner := spin.NewRunner(client, &spin.Executor{Root: cfg.root}, cfg.maxRounds)
+	var ledger *spin.Ledger
+	if !cfg.noSave {
+		ledger = spin.NewLedger(cfg.sessionsDir, session)
+		defer ledger.Close()
+	}
+	tools := &spin.Executor{Root: cfg.root, CommandTimeout: cfg.cmdTimeout, Safe: cfg.safe}
+	defer tools.Shutdown()
+
+	runner := spin.NewRunner(client, tools, cfg.maxRounds)
+	runner.Ledger = ledger
+	runner.CompactChars = cfg.compact
 	runner.OnEvent = func(ev spin.Event) {
 		if rec != nil {
 			rec.Observe(ev)
 		}
-		if ev.Kind == spin.EventNudge {
-			fmt.Fprintln(os.Stderr, "[spin] no tool calls on a repo question — asking for evidence")
+		if ev.Kind == spin.EventNudge && ev.Text != "" {
+			fmt.Fprintln(os.Stderr, "[spin]", ev.Text)
 		}
 	}
 

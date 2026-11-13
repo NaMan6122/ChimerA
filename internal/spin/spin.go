@@ -80,9 +80,21 @@ func ToolDefs() []ToolDef {
 				"search":  prop("string", "exact text to find; must occur exactly once"),
 				"replace": prop("string", "replacement text")},
 			"path", "search", "replace"),
-		mkTool("run_command", "Run a shell command from the repository root and return its combined output (60s limit).",
+		mkTool("run_command", "Run a shell command from the repository root and return its combined output (5m limit; raise with -cmd-timeout).",
 			map[string]any{"command": prop("string", "command line to execute with bash -lc")},
 			"command"),
+		mkTool("git", "Run one read-only git subcommand (status, diff, log, show, branch, blame, …) without shell quoting.",
+			map[string]any{"subcommand": prop("string", "read-only git subcommand, e.g. diff"),
+				"args": prop("string", "optional arguments, space-separated, e.g. \"HEAD~1 -- internal/\"")},
+			"subcommand"),
+		mkTool("monitor", "Run a shell command in the background and read its output later. start returns an id immediately (does not wait for exit); read polls recent output and status; stop kills it; list shows all.",
+			map[string]any{"action": prop("string", "start | read | stop | list"),
+				"command":     prop("string", "start: command line to execute with bash -lc, from the repository root"),
+				"description": prop("string", "start: a few words naming the monitor"),
+				"id":          prop("integer", "read/stop: monitor id from the start result"),
+				"timeout_s":   prop("integer", "start: wall-clock limit in seconds (default 300, max 3600)"),
+				"persistent":  prop("boolean", "start: run until stopped or the run ends, ignoring timeout_s")},
+			"action"),
 		mkTool("read_pdf", "Extract text from a PDF with pdftotext -layout (poppler). Optionally limit to a 1-indexed page range. Fails with an install hint if poppler is missing; encrypted or image-only PDFs are rejected (no OCR).",
 			map[string]any{"path": prop("string", "PDF path relative to the repository root"),
 				"pages":     prop("object", `optional page range, e.g. {"from":2,"to":5}`),
@@ -101,7 +113,9 @@ func ToolDefs() []ToolDef {
 // JSON.
 const SystemPrompt = `You are a coding agent working inside a git repository. You cannot read files, list directories or run commands directly: every action is requested by emitting a JSON block, which the harness executes and returns to you as text.
 
-Available tools: read_file, list_dir, grep, write_file, edit_file, run_command, read_pdf.
+Available tools: read_file, list_dir, grep, write_file, edit_file, run_command, git, monitor, read_pdf.
+
+monitor runs a command in the background: start returns an id at once, then read the id's output in later rounds until it reports done.
 
 To act, reply with ONLY a JSON code block and no commentary:
 

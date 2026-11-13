@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,6 +27,21 @@ const (
 // Executor runs tool calls confined to one workspace root.
 type Executor struct {
 	Root string
+
+	// CommandTimeout bounds run_command, git and monitor-adjacent work.
+	// Zero selects the default (5m): cold test suites and Docker builds
+	// routinely exceed the 60s the first version hard-coded.
+	CommandTimeout time.Duration
+
+	// Safe applies the advisory denylist (see monitor.go / SECURITY.md) to
+	// run_command and monitor start. Hardening, not a sandbox.
+	Safe bool
+
+	// Monitor registry state (see monitor.go).
+	monMu    sync.Mutex
+	monSeq   int
+	monDir   string
+	monitors map[int]*monitorState
 }
 
 // Exec dispatches one call. Failures are returned as text, not errors: a broken
@@ -50,9 +66,26 @@ func (e *Executor) Exec(tc ToolCall) string {
 		return e.editFile(args)
 	case "run_command":
 		return e.runCommand(args)
+	case "git":
+		return e.git(args)
+	case "monitor":
+		return e.monitorTool(args)
 	default:
-		return fmt.Sprintf("error: unknown tool %q (available: read_file, read_pdf, list_dir, grep, write_file, edit_file, run_command)", tc.Function.Name)
+		return fmt.Sprintf("error: unknown tool %q (available: read_file, read_pdf, list_dir, grep, write_file, edit_file, run_command, git, monitor)", tc.Function.Name)
 	}
+}
+
+// commandTimeout returns the configured command timeout, defaulting to five
+// minutes; cold test suites and Docker builds routinely exceed the 60s the
+// first version hard-coded.
+func (e *Executor) commandTimeout() time.Duration {
+	if e.CommandTimeout <= 0 {
+		return 5 * time.Minute
+	}
+	if e.CommandTimeout < 5*time.Second {
+		return 5 * time.Second
+	}
+	return e.CommandTimeout
 }
 
 // Describe renders a call for the UI: the tool and its most useful argument.
@@ -240,7 +273,10 @@ func (e *Executor) runCommand(args map[string]any) string {
 	if cmdline == "" {
 		return "error: command must not be empty"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if reason := blockedBySafeMode(cmdline); reason != "" {
+		return "error: blocked in safe mode: " + reason
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), e.commandTimeout())
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdline)
 	cmd.Dir = e.Root
@@ -255,6 +291,68 @@ func (e *Executor) runCommand(args map[string]any) string {
 	return res
 }
 
+// gitReadOnly lists the subcommands the git tool will run. Writes go through
+// write_file/edit_file/run_command where the model already has reviewable,
+// budgeted paths; this tool exists so inspection never needs shell quoting.
+var gitReadOnly = map[string]bool{
+	"status": true, "diff": true, "log": true, "show": true, "branch": true,
+	"rev-parse": true, "describe": true, "remote": true, "tag": true,
+	"blame": true, "stash": true, "shortlog": true,
+}
+
+// git runs one read-only git subcommand — no shell, so argument text can
+// never become a second command.
+func (e *Executor) git(args map[string]any) string {
+	sub := str(args, "subcommand")
+	if sub == "" {
+		names := make([]string, 0, len(gitReadOnly))
+		for n := range gitReadOnly {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		return "error: git needs a subcommand (read-only ones: " + strings.Join(names, ", ") + ")"
+	}
+	if !gitReadOnly[sub] {
+		return fmt.Sprintf("error: git %q is not a read-only subcommand; use run_command for writes", sub)
+	}
+	var argv []string
+	if extra := strings.TrimSpace(str(args, "args")); extra != "" {
+		argv = strings.Fields(extra) // no shell: spaces split, nothing executes
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), e.commandTimeout())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{sub}, argv...)...)
+	cmd.Dir = e.Root
+	out, err := cmd.CombinedOutput()
+	res := clip(string(out))
+	if err != nil {
+		return fmt.Sprintf("%s\n[exit: %v]", res, err)
+	}
+	if strings.TrimSpace(res) == "" {
+		return "(no output)"
+	}
+	return res
+}
+
+// monitorTool dispatches the background-command tool; semantics in monitor.go.
+func (e *Executor) monitorTool(args map[string]any) string {
+	if e.monitors == nil {
+		e.monitors = map[int]*monitorState{}
+	}
+	switch str(args, "action") {
+	case "start":
+		return e.startMonitor(args)
+	case "read":
+		return e.readMonitor(args)
+	case "stop":
+		return e.stopMonitor(args)
+	case "list", "":
+		return e.listMonitors()
+	default:
+		return "error: monitor action must be start, read, stop or list"
+	}
+}
+
 // Resolve confines a path to the workspace. A model that can write anywhere is a
 // liability, not a feature.
 func (e *Executor) Resolve(p string) (string, error) {
@@ -266,11 +364,41 @@ func (e *Executor) Resolve(p string) (string, error) {
 		abs = filepath.Join(e.Root, p)
 	}
 	abs = filepath.Clean(abs)
-	rel, err := filepath.Rel(e.Root, abs)
+	// Symlink hardening (spec-021 acceptance): lexical confinement is escaped
+	// by a symlink planted inside the root pointing out of it. Evaluate the
+	// real paths — the target file may not exist yet (writes), so fall back
+	// to the deepest existing ancestor — and re-check containment against
+	// both the resolved root and the resolved path.
+	root := e.Root
+	if real, err := filepath.EvalSymlinks(root); err == nil {
+		root = real
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	} else if real, err := deepestExisting(abs); err == nil {
+		abs = real
+	}
+	rel, err := filepath.Rel(root, abs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q is outside the workspace", p)
 	}
 	return abs, nil
+}
+
+// deepestExisting resolves symlinks along p's ancestors as far as they exist,
+// keeping the final element (the not-yet-existing file name) intact.
+func deepestExisting(p string) (string, error) {
+	dir := filepath.Dir(p)
+	for {
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(real, filepath.Base(p)), nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p, os.ErrNotExist
+		}
+		dir = parent
+	}
 }
 
 func clip(s string) string {

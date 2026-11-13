@@ -69,16 +69,34 @@ func (c *Client) Complete(msgs []Message, withTools bool) (Message, time.Duratio
 	if err != nil {
 		return Message{}, 0, err
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return Message{}, 0, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("X-Session-Id", c.Session)
-
+	// Retry with backoff on 429/5xx and connection errors: the turn never
+	// landed, so re-sending is safe, and one transient vendor failure must
+	// not kill a nine-round run at round nine. Non-retryable statuses (400,
+	// 401, 404...) surface immediately.
 	t0 := time.Now()
-	resp, err := c.HTTP.Do(req)
+	var resp *http.Response
+	for attempt := 1; ; attempt++ {
+		var req *http.Request
+		req, err = http.NewRequest(http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return Message{}, 0, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("X-Session-Id", c.Session)
+		resp, err = c.HTTP.Do(req)
+		if err == nil && !retryableStatus(resp.StatusCode) {
+			break
+		}
+		if attempt >= maxSendAttempts {
+			break
+		}
+		if resp != nil {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+		}
+		time.Sleep(sendBackoff[attempt-1])
+	}
 	if err != nil {
 		return Message{}, 0, fmt.Errorf(`cannot reach the Chimera gateway at %s
   %v
@@ -109,6 +127,24 @@ func (c *Client) Complete(msgs []Message, withTools bool) (Message, time.Duratio
 	msg := out.Choices[0].Message
 	msg.Content = stripEscapeTags(msg.Content)
 	return msg, elapsed, nil
+}
+
+// maxSendAttempts bounds one Complete call: the original try plus two
+// retries, with sendBackoff pacing between them.
+const maxSendAttempts = 3
+
+var sendBackoff = [...]time.Duration{time.Second, 3 * time.Second}
+
+// retryableStatus reports whether an HTTP status may succeed on a retry:
+// rate limiting and transient upstream/gateway failures only. Permanent
+// request errors (400, 401, 404) must surface immediately.
+func retryableStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, http.StatusInternalServerError,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
 }
 
 // escapeTagRe matches the markers chatgpt.com wraps fenced blocks in. They are a
