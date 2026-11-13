@@ -223,7 +223,7 @@ opencode, your own agent loop — keeps working.
 - **Tool calling without a tool-calling API.** Signatures injected into the
   prompt, a brace-depth parser that survives code fences, unknown-name
   rejection, `call_<hex>` ids, results folded into the next turn. Reliable
-  for 1–7 tools; hardening tracked in an internal spec (004).
+  for 1–7 tools.
 - **Observable scraping, not hopeful scraping.** `/metrics` covers request
   outcomes, round-trip histograms, transport downgrades, and a
   selector-fallback radar that fires the moment a vendor changes their DOM.
@@ -233,7 +233,7 @@ opencode, your own agent loop — keeps working.
 - **Hardened where it hurts.** Multi-key auth, CORS, body caps, provider
   locks with timeouts, prompt-length guards, echo recovery.
 - **Agent-native.** As the model: swap the base URL. As a tool: escalate hard
-  reasoning steps through MCP `chat` (internal spec 001),
+  reasoning steps through MCP `chat`,
   or let five subscriptions vote behind one call.
 
 ---
@@ -273,9 +273,9 @@ and a method, not an SLA — re-run the probe for your own.
 | Qwen | `chimera-qwen` | ✅ | ⚠️ captcha-blocked (below) | DOM works; tokens auto-refresh |
 | DeepSeek | `chimera-deepseek` | ✅ | ✅ `DeepSeekHashV1` PoW | chat + text-stability fallback |
 | Kimi | `chimera-kimi` | ✅ | — | chat + text-stability fallback |
-| Gemini | `chimera-gemini` | — | ✅ cookie custody, `SNlM0e` nonce, three-id continuation (internal spec 013) | chat; model `auto` takes Google's default |
-| Grok | `chimera-grok` | — | ✅ live-verified (internal spec 014) | cookie custody; model side is stateless — the provider folds the transcript, so turns re-pay context |
-| GLM (Zhipu) | `chimera-glm` | — | ✅ live-verified (internal spec 024) | refresh-token custody + one MD5 header-signature; native `conversation_id` continuity (no-history invariant holds) |
+| Gemini | `chimera-gemini` | — | ✅ cookie custody, `SNlM0e` nonce, three-id continuation | chat; model `auto` takes Google's default |
+| Grok | `chimera-grok` | — | ✅ live-verified | cookie custody; model side is stateless — the provider folds the transcript, so turns re-pay context |
+| GLM (Zhipu) | `chimera-glm` | — | ✅ live-verified | refresh-token custody + one MD5 header-signature; native `conversation_id` continuity (no-history invariant holds) |
 
 Adding a provider: copy the `qwen/` DOM template, register it in `config` and
 `cmd/chimera/main.go`. A browserless transport implements
@@ -328,7 +328,7 @@ VNC URL, and someone else watching the selectors.
 Starter tiers, priced by substrate rather than per token — **Subscriber API
 $9–12/mo** (browserless, 10k requests), **Browser Solo $19/mo** (5k), **Team
 $79/mo** (auto transport with warm fallback, 50k), Scale custom. Unit
-economics: internal SaaS model + ADR-002 (private repo).
+Unit economics are not published.
 
 ---
 

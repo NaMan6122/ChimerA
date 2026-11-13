@@ -72,9 +72,13 @@ git tag v0.4.0 && git push origin v0.4.0
 ```
 
 That is the whole run. The workflow builds every platform on the tag commit,
-creates the GitHub release with `--generate-notes`, and uploads the five
-archives, `checksums.txt`, and `chimera.rb`. Watch it under
-<https://github.com/NaMan6122/ChimerA/actions>.
+creates the GitHub release with `--generate-notes`, uploads the five archives,
+`checksums.txt` and `chimera.rb`, and then pushes the formula into the
+Homebrew tap — so `brew upgrade chimera` sees the release without a manual
+copy. Watch it under <https://github.com/NaMan6122/ChimerA/actions>.
+
+The tap step runs *after* the release is published, so a tap failure never
+blocks the artifacts users download; it degrades to a warning.
 
 Tag rules:
 
@@ -87,7 +91,7 @@ Tag rules:
   archive it points at).
 - Before tagging, run the local dry run (§4) so the CI build is a formality.
 
-## 3. The Homebrew tap (one-time setup, then one copy per release)
+## 3. The Homebrew tap (one-time setup, then automatic)
 
 Homebrew installs from a *tap* — a separate repository holding the formula.
 The formula itself is generated per release (`dist/chimera.rb`) and pins the
@@ -102,7 +106,20 @@ git clone git@github.com:NaMan6122/homebrew-chimera.git
 cd homebrew-chimera && mkdir Formula
 ```
 
-Per release (after the workflow goes green):
+**Per release: nothing to do.** The release workflow's `Update Homebrew tap`
+step copies `dist/chimera.rb` into the tap and commits it, so the tap moves in
+lockstep with the release.
+
+That step needs a repository secret, set once:
+
+```bash
+# fine-grained PAT, contents:write on NaMan6122/homebrew-chimera
+gh secret set TAP_TOKEN --repo NaMan6122/ChimerA
+```
+
+Without `TAP_TOKEN` the step prints a warning and skips; the release still
+succeeds and the formula is still attached to it, so the manual fallback below
+always works:
 
 ```bash
 cd /path/to/homebrew-chimera
@@ -111,6 +128,10 @@ curl -fsSLo Formula/chimera.rb \
 git add Formula/chimera.rb && git commit -m "chimera 0.4.0" && git push
 brew audit --formula NaMan6122/chimera/chimera   # optional but cheap
 ```
+
+The formula installs the three binaries plus the `chimera-<provider>`
+launcher symlinks, and its `test do` asserts that a launcher resolves and
+dispatches — so a broken `argv[0]` route fails `brew test`, not a user.
 
 `livecheck` in the formula uses `strategy :github_latest`, so
 `brew livecheck chimera` reports staleness against the newest release.

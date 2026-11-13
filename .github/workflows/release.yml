@@ -3,8 +3,14 @@
 #
 # scripts/dist.sh cross-compiles all three binaries for darwin/linux
 # (amd64+arm64) plus a windows zip, writes checksums.txt and generates the
-# Homebrew formula, and this workflow publishes the set as a GitHub release.
-# After it goes green, copy the formula into the tap (see docs/DISTRIBUTION.md).
+# Homebrew formula, and this workflow publishes the set as a GitHub release
+# and pushes the formula into the tap, so `brew upgrade` sees the new version
+# without a manual copy step (see docs/DISTRIBUTION.md).
+#
+# The tap push needs a TAP_TOKEN secret: a fine-grained PAT with
+# contents:write on NaMan6122/homebrew-chimera. Without it the step is
+# skipped with a warning and the release still succeeds — the formula is
+# attached to the release either way, so the tap can be updated by hand.
 name: release
 
 on:
@@ -41,3 +47,28 @@ jobs:
             --title "chimera $GITHUB_REF_NAME" \
             --generate-notes \
             --verify-tag
+
+      # Homebrew updates alongside the release. Runs after the release exists
+      # so a tap failure never blocks the artifacts users download.
+      - name: Update Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::TAP_TOKEN is not set — skipping the tap update."
+            echo "The formula is attached to the release; copy it into the tap by hand."
+            exit 0
+          fi
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/NaMan6122/homebrew-chimera.git" tap
+          cp dist/chimera.rb tap/Formula/chimera.rb
+          cd tap
+          if git diff --quiet; then
+            echo "formula already current — nothing to push"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chimera ${VERSION#v}"
+          git push

@@ -201,32 +201,16 @@ Single replica per provider (browser is stateful, not horizontally scaled withou
 
 ---
 
-## 8. Limitations (shared with Chimera)
+## 8. Known limitations
 
-- Latency 10–20s per request (real browser round-trip); 3–8s on the browserless qwen transport (internal ADR-002).
+- Latency 10–20s per request on the browser path (real browser round-trip);
+  1–3s on the browserless transports.
 - Sessions expire days/weeks → re-login volume.
-- UI selectors brittle → centralize in `selectors.go`, monitor vendor DOM.
-- Tool calling via prompting reliable for 1-7 tools; complex schemas may need retry.
-- Single page concurrency → serialized; true multi-tab pool is v2.
-- Vision/file attachments scaffolding present (selectors for hidden file input) but not yet wired to `ContentPart.image_url` extraction.
-
----
-
-## 9. Roadmap vs Chimera
-
-- [x] Go port (static binary, lower RAM, faster boot)
-- [x] 4 providers (ChatGPT, Claude, Qwen, DeepSeek)
-- [x] Tool calling prompt injection + brace-depth parser
-- [x] Streaming emulation + auth + rate limit
-- [ ] **Page pool** (Chimera's BrowserPagePool): N tabs, round-robin, `x-session-id` stickiness, `/preview` SSE screen-share
-- [ ] **Vision/files**: download `image_url`/`file` parts → `set_input_files` on hidden `<input type=file>` → wait 3s +1s/file
-- [ ] **TUI** (like Chimera's textual TUI) for interactive chat
-- [ ] **Metrics**: Prometheus for request duration, selector fallback hits, echo count
-- [ ] **Image generation** (ChatGPT DALL-E) via DOM scrape
-
----
-
-## 10. Why not keep Chimera's Python stack?
-
-The quantitative runtime comparison lives in the internal tech-stack decision record (private repo). TL;DR: Go static binary wins on footprint, startup, and concurrency; Python's Patchright+FastAPI is excellent for velocity but heavier and GIL-bound.
+- UI selectors are brittle on the browser path → centralized in
+  `selectors.go`.
+- Tool calling via prompting is reliable for 1–7 tools; complex schemas may
+  need a retry.
+- Single page concurrency → serialized; a true multi-tab pool is future work.
+- Vision/file attachments are scaffolded but not yet wired to
+  `ContentPart.image_url` extraction.
 

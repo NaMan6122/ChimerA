@@ -6,7 +6,7 @@ codebase is small and opinionated.
 ## Ground rules
 
 1. **No captcha evasion.** Solving human captchas programmatically is against
-   this project's policy (PRD §9, internal). Anti-bot work that is *computed*
+   this project's policy. Anti-bot work that is *computed*
    (proof-of-work, nonces, request signing) is fine; slider/checkbox captchas
    are not.
 2. **No reverse-engineering material in this repo.** Vendor protocol

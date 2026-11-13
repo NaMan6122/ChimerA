@@ -63,4 +63,4 @@ boundary deserves stating plainly:
   you logged into, which is the core promise.
 - MCP-spawned spins inherit all of this; if you expose the MCP server to a
   client you do not fully trust, scope its workspace with `-root`/`AUTH_DIR`
-  accordingly (see spec 021).
+  accordingly.

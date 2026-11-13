@@ -14,7 +14,7 @@ them. Every provider except `claude` now runs without a browser.
 
 ### Added — providers
 
-- **Zhipu GLM browserless transport** (`chimera-glm`, internal spec 024):
+- **Zhipu GLM browserless transport** (`chimera-glm`):
   replays chatglm.cn's web API with refresh-token custody and one MD5
   header-signature (static public secret — no PoW, no VM). Live-verified at
   spike level before implementation; the parser is tested against the
@@ -27,7 +27,7 @@ them. Every provider except `claude` now runs without a browser.
   clean; the delete's `status` envelope is honoured, since chatglm.cn
   reports a failed delete as HTTP 200.
 
-- **Kimi browserless transport** (`chimera-kimi`, internal spec 025):
+- **Kimi browserless transport** (`chimera-kimi`):
   replays kimi.ai's Connect-protocol chat API with refresh-token custody —
   no signature, no proof-of-work, no JS challenge, only account
   rate-limiting. Events are `op`-driven (`set` replaces, `append` appends),

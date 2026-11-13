@@ -128,6 +128,11 @@ class Chimera < Formula
 
   def install
     bin.install "chimera", "chimera-spin", "chimera-chat"
+    # One-word backend launchers: chimera-kimi == chimera up kimi. The gateway
+    # dispatches on argv[0], so these are plain symlinks to it.
+    %w[chatgpt gpt qwen deepseek kimi gemini grok glm].each do |prov|
+      bin.install_symlink "chimera" => "chimera-#{prov}"
+    end
   end
 
   def caveats
@@ -135,7 +140,8 @@ class Chimera < Formula
       The gateway reads .env, auth_data/ and browser_data/ from its working
       directory. Before the first browserless start:
         chimera auth login <provider>       # opens a browser once
-        TRANSPORT=webapi PROVIDER=chatgpt chimera
+        chimera up                          # every backend you have a session for
+        chimera up kimi                     # or just one (also: chimera-kimi)
     EOS
   end
 
@@ -143,6 +149,8 @@ class Chimera < Formula
     assert_match version.to_s, shell_output("#{bin}/chimera -version")
     assert_match version.to_s, shell_output("#{bin}/chimera-spin -version")
     assert_match version.to_s, shell_output("#{bin}/chimera-chat -version")
+    # The launcher symlinks must resolve and dispatch (argv[0] -> provider).
+    assert_match version.to_s, shell_output("#{bin}/chimera-kimi -version")
   end
 end
 EOF
