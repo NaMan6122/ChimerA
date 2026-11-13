@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -27,6 +28,11 @@ Commands:
   show <id>                  print the session's runbook (Markdown) to stdout
   export <id> -o <file>      write the runbook to a file (--html for a
                              printable, self-contained HTML page)
+  export --all -o <dir>      vault: one runbook per session plus index.md
+                             (--html for HTML pages)
+  rehydrate <id>             print a context block distilled from the
+                             transcript — seed a FRESH conversation with it
+                             (-o <file> writes it; -chars caps the block)
 
 Flags:
   -dir <path>   sessions directory (default: $CHIMERA_SESSIONS_DIR, else
@@ -81,8 +87,20 @@ func runSessions(args []string) {
 		}
 		fmt.Print(md)
 	case "export":
+		if tail.all {
+			out := tail.out
+			if out == "" {
+				out = "./sessions-export"
+			}
+			written, err := sessions.ExportAll(tail.dir, out, tail.html)
+			if err != nil {
+				failSessions(err.Error())
+			}
+			fmt.Printf("wrote %d file(s) to %s (index.md included)\n", len(written), out)
+			return
+		}
 		if len(rest) == 0 {
-			failSessions("export needs a session id")
+			failSessions("export needs a session id (or --all)")
 		}
 		id := rest[0]
 		out := tail.out
@@ -107,6 +125,23 @@ func runSessions(args []string) {
 			failSessions(err.Error())
 		}
 		fmt.Printf("wrote %s\n", out)
+	case "rehydrate":
+		if len(rest) == 0 {
+			failSessions("rehydrate needs a session id (see `chimera sessions list`)")
+		}
+		id := rest[0]
+		block, err := sessions.RehydrateContext(filepath.Join(tail.dir, id+".jsonl"), tail.chars)
+		if err != nil {
+			failSessions(err.Error())
+		}
+		if tail.out != "" {
+			if err := os.WriteFile(tail.out, []byte(block), 0o644); err != nil {
+				failSessions(err.Error())
+			}
+			fmt.Printf("wrote %s (%d chars) — seed a FRESH conversation with it; nothing is re-executed\n", tail.out, len(block))
+			return
+		}
+		fmt.Print(block)
 	default:
 		failSessions(fmt.Sprintf("unknown sessions command %q", sub))
 	}
@@ -121,6 +156,8 @@ type tailOpts struct {
 	tag        string
 	out        string
 	html       bool
+	all        bool
+	chars      int
 }
 
 // parseTail scans sessions arguments in one pass, keeping positionals in
@@ -157,6 +194,18 @@ func parseTail(args []string) (*tailOpts, error) {
 			o.out, i = v, i+1
 		case "-html", "--html":
 			o.html = true
+		case "-all", "--all":
+			o.all = true
+		case "-chars", "--chars":
+			v, err := value(i, "-chars")
+			if err != nil {
+				return nil, err
+			}
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return nil, fmt.Errorf("-chars wants a number, got %q", v)
+			}
+			o.chars, i = n, i+1
 		default:
 			if strings.HasPrefix(a, "-") && len(a) > 1 {
 				return nil, fmt.Errorf("unknown flag %q", a)
