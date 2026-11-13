@@ -46,7 +46,7 @@ see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 - **Safety**: `-safe` advisory denylist for `run_command`/`monitor`; tool
   path confinement now resolves symlinks (spec-021 acceptance closed);
   `-max-rounds` default 8 → 16.
-- New spec: `docs/internal/specs/022-agent-hardening.md`.
+- Spec'd internally (022).
 
 ### Added — local history
 
