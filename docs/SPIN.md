@@ -284,6 +284,14 @@ handoffs, auditing and recovery without paying for it in prompt size.
 - `-no-save` disables recording; `-sessions-dir` moves it.
 - Session ids are sanitised, so an id cannot escape the directory.
 
+The gateway preserves too: every turn through `/v1/chat/completions` (web UIs,
+curl, harnesses) is appended to the same directory, tagged `gateway`. With no
+`X-Session-Id` header the turns of one conversation are recognised by their
+opening (system + first user message) and land in one transcript. `SESSIONS_DIR`
+(default as above; empty disables) moves or stops it, and failed turns are
+kept as error notes. UI side-requests such as title generation have a
+different opening, so they appear as their own small transcripts.
+
 ## One harness, any backend
 
 The harness names no provider. Point it at whichever gateway is running:
@@ -307,19 +315,48 @@ The harness cost is identical; the difference is the vendor's web API.
 
 ## Tools
 
-Seven, not twenty — past a handful of schemas the prompt-injected calling
+Nine, not twenty — past a handful of schemas the prompt-injected calling
 convention degrades, and every schema is prompt bytes on the first turn.
 
-`read_file` · `list_dir` · `grep` · `write_file` · `edit_file` · `run_command` · `read_pdf`
+`read_file` · `list_dir` · `grep` · `write_file` · `edit_file` · `run_command` · `git` · `monitor` · `read_pdf`
 
-Paths are confined to `-root`; a model that can escape the workspace is a
-liability. `edit_file` requires the search text to occur exactly once. Tool
-failures are returned to the model as text rather than aborting the spin — a
-broken call is information it can use.
+Paths are confined to `-root`, and confinement resolves symlinks, so a link
+planted inside the root cannot point a tool outside it. `edit_file` requires
+the search text to occur exactly once. Tool failures are returned to the model
+as text rather than aborting the spin — a broken call is information it can
+use.
+
+`run_command` and `git` share a per-command budget (`-cmd-timeout`, default
+5m): cold test suites and Docker builds need it. `git` runs read-only
+subcommands only — status, diff, log, blame, … — without a shell, so argument
+text can never become a second command. `monitor` runs a command in the
+background: `start` returns an id at once (never blocks a round), `read`
+polls the log tail and status, `stop` kills it, `list` enumerates; at most
+eight live monitors, timeout clamped to 10s–1h, `persistent: true` until
+stopped or the run ends. `-safe` applies an advisory denylist (privilege
+escalation, device overwrite, pipe-to-shell, …) to `run_command` and
+`monitor` — hardening, not a sandbox.
 
 Output budgets: 8,000 chars per call, 16,000 per round. Measured: eight parallel
 12k file reads produced a 65k-char follow-up prompt, which is the same
 accumulation arriving through the tool channel.
+
+## Context ledger and compaction
+
+The provider holds the conversation by design, which makes its window
+invisible. The harness therefore keeps its own working copy — the **ledger** —
+under `<sessions-dir>/ledgers/<session>.ledger.jsonl`: every task, round,
+tool call, tool result and reply, tagged with the provider-side generation in
+effect. The ledger is persistence, not prompt: nothing in it is re-sent.
+
+When the estimated upstream size crosses `-compact-chars` (default 80,000
+chars), the loop compacts: it rotates to a **fresh provider-side session**
+(`<session>-c1`, `-c2`, …) seeded with a deterministic digest of the work —
+the task, the per-round tool shape, and the last tool results. The
+harness-side session (transcript, ledger) never changes: provider-side and
+harness-side sessions are different things, and compaction is where that
+distinction pays. Transient vendor failures (429/5xx) are retried with
+backoff — a turn that never landed is safe to re-send.
 
 ## Protocol notes
 

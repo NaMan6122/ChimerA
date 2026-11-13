@@ -5,6 +5,60 @@ All notable changes to Chimera are documented here. Format follows
 their GitHub releases. Cutting a release includes updating this file —
 see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
+## [Unreleased]
+
+### Added — agent hardening (SWE readiness)
+
+- **`monitor` tool** (adapted from Anvaya-CLI spec-185): run a command in the
+  background — `start` returns an id immediately, `read` polls the log tail +
+  status, `stop` kills, `list` enumerates; ≤8 live monitors, 10s–1h timeout
+  clamp, persistent until stopped or run end.
+- **`git` tool**: read-only subcommands (status/diff/log/blame/…) with no
+  shell in the path, so arguments can never execute as a second command.
+- **Command budget**: `run_command`/`git` bounded by `-cmd-timeout`
+  (default 5m, was a hard 60s); partial output still returns on timeout.
+- **Context ledger**: the harness keeps a persisted working copy of the whole
+  session (task, rounds, tool calls, results, replies) under
+  `<sessions-dir>/ledgers/`, tagged by provider-side generation — visible
+  context sizing without ever re-sending the copy. At `-compact-chars`
+  (default 80k estimated chars) the loop **compacts**: fresh provider-side
+  session (`<session>-cN`) seeded with a deterministic digest; harness-side
+  session, transcript and ledger unchanged.
+- **Resilience**: mid-run tool refusals get one re-asserting nudge instead of
+  silently becoming the final answer; the client retries 429/5xx/connection
+  errors (1s/3s backoff, ≤3 attempts) — permanent errors surface immediately.
+- **Safety**: `-safe` advisory denylist for `run_command`/`monitor`; tool
+  path confinement now resolves symlinks (spec-021 acceptance closed);
+  `-max-rounds` default 8 → 16.
+- New spec: `docs/internal/specs/022-agent-hardening.md`.
+
+### Added — local history
+
+- **Gateway session recording**: every provider turn through the
+  OpenAI-compatible API (Open WebUI, Chatbox, curl, harnesses) is appended to
+  a local transcript alongside spin and TUI history — one file per
+  conversation, tagged `gateway` + provider, readable with the existing
+  `chimera sessions list | show | export`.
+- Stateless clients: a conversation's growing history lands in one transcript
+  (stable digest of the opening); a client `X-Session-Id` names the file
+  directly.
+- `SESSIONS_DIR` env (default `~/.local/share/chimera/sessions`; empty
+  disables). Failed turns are preserved as error notes; pre-flight rejections
+  (too long, quota, rate limit) are not recorded.
+- Multi-turn runbooks: later user messages now render inside the run; the
+  first remains the Task.
+
+### Fixed
+
+- **DeepSeek empty replies**: DeepSeek's thinking stream now delivers the
+  answer inside a `{"p":"response/fragments"}` patch with no `"o"` op (a full
+  replacement snapshot, verified live 2026-11-13) instead of the old
+  `"o":"APPEND"` increment. The parser dropped it, so thinking-mode turns
+  populated reasoning but returned an empty message. The snapshot is now
+  applied (fixture + regression test from the live capture), and a turn that
+  is still empty after the fresh-chat retry fails with an error instead of a
+  blank reply.
+
 ## [v0.2.0](https://github.com/NaMan6122/ChimerA/releases/tag/v0.2.0) — 2026-11-06
 
 ### Added — providers
