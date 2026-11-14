@@ -128,8 +128,10 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	log_.Infof("Chimera starting (provider=%s, port=%d)", cfg.Provider, cfg.APIPort)
-	log_.Infof("Provider URL: %s", cfg.ProviderURL())
+	log_.Infof("Chimera starting (provider=%s, transport=%s, port=%d)", cfg.Provider, cfg.Transport, cfg.APIPort)
+	if !cfg.IsPooled() {
+		log_.Infof("Provider URL: %s", cfg.ProviderURL())
+	}
 
 	// MCP stdio mode: no HTTP server, no port. Providers init as usual, then
 	// Serve until stdin EOF or SIGINT (spec 001).
@@ -156,30 +158,13 @@ func main() {
 	)
 
 	if cfg.IsPooled() {
-		// Single Chromium, one Page per provider — ~400MB total not 3×400MB
-		pool = browser.NewPool(cfg)
-		providersToLaunch := cfg.PooledProviders()
-		log_.Infof("Chimera pooled mode: launching single Chromium for %v", providersToLaunch)
-		if err := pool.Launch(providersToLaunch, func(name string, page *rod.Page, cfg *config.Config) interface{} {
-			return createProviderByName(name, page, cfg)
-		}); err != nil {
-			log.Fatalf("Failed to launch pool: %v", err)
+		ps, err := initPooledProviders(cfg)
+		if err != nil {
+			log.Fatalf("Failed to initialize pooled providers: %v", err)
 		}
-		// Build provider map for API routing
-		poolProviders := make(map[string]providers.Provider)
-		mutexMap := make(map[string]*sync.Mutex)
-		for _, name := range pool.ProviderNames() {
-			if provI, ok := pool.ProviderFor(name); ok {
-				if prov, ok := provI.(providers.Provider); ok {
-					poolProviders[name] = prov
-				}
-			}
-			if mu := pool.MutexFor(name); mu != nil {
-				mutexMap[name] = mu
-			}
-		}
-		server = api.NewPooledServer(cfg, poolProviders, mutexMap, pool.Browser())
-		log_.Infof("Pool ready: %v", pool.ProviderNames())
+		pool = ps.pool
+		server = api.NewPooledServer(cfg, ps.providers, ps.mutexes, ps.browser)
+		log_.Infof("Pool ready: %v", sortedNames(ps.providers))
 	} else {
 		if cfg.UseWebAPI() {
 			// Browserless web-API transport (specs 011/012). In auto mode a broken
@@ -382,26 +367,14 @@ func runMCP(cfg *config.Config) {
 	)
 
 	if cfg.IsPooled() {
-		// Single Chromium, one Page per provider — same economy as the HTTP path.
-		pool = browser.NewPool(cfg)
-		providersToLaunch := cfg.PooledProviders()
-		log_.Infof("Chimera MCP pooled mode: launching single Chromium for %v", providersToLaunch)
-		if err := pool.Launch(providersToLaunch, func(name string, page *rod.Page, cfg *config.Config) interface{} {
-			return createProviderByName(name, page, cfg)
-		}); err != nil {
-			log.Fatalf("Failed to launch pool: %v", err)
+		ps, err := initPooledProviders(cfg)
+		if err != nil {
+			log.Fatalf("Failed to initialize pooled providers: %v", err)
 		}
-		for _, name := range pool.ProviderNames() {
-			if provI, ok := pool.ProviderFor(name); ok {
-				if prov, ok := provI.(providers.Provider); ok {
-					provs[name] = prov
-				}
-			}
-			if mu := pool.MutexFor(name); mu != nil {
-				mus[name] = mu
-			}
-		}
-		br = pool.Browser()
+		provs = ps.providers
+		mus = ps.mutexes
+		pool = ps.pool
+		br = ps.browser
 	} else {
 		if cfg.UseWebAPI() {
 			ctor, ok := webapi.Lookup(cfg.Provider)
