@@ -1,66 +1,69 @@
 # Chimera Architecture
 
-> Browser-based LLM Gateway — expose ChatGPT, Claude, Qwen, DeepSeek web sessions as an OpenAI-compatible API.
+> A dual-substrate Go gateway: browserless HTTP replay of the vendor's own web
+> API is the fast path (no browser, ~24 MB, ~1–2 s turns); real Chromium via
+> [rod](https://github.com/go-rod/rod) is the universal fallback and the only
+> path for `claude` today.
 
-Inspired by [Chimera-Gateway](https://github.com/GautamVhavle/Chimera-Gateway) but re-architected in **Go** for minimal runtime, static binary distribution, and goroutine-native concurrency.
+Point any OpenAI SDK, LangChain chain, or agent harness at Chimera and your
+ChatGPT / Claude / Qwen / DeepSeek / Kimi / Gemini / Grok / GLM login answers
+over `/v1`.
 
 ---
 
 ## 1. System Overview
 
 ```
-Client (OpenAI SDK / LangChain / curl / any OpenAI client)
+Client (OpenAI SDK / LangChain / curl / chimera-spin / an agent)
     │
     ▼
-┌──────────────────────────────┐
-│  Chimera Gateway (Go)        │  :8000
-│  ┌────────────────────────┐  │
-│  │ API Layer (chi)        │  │  OpenAI-compatible + health + auth + rate-limit + CORS
-│  │  /v1/chat/completions  │  │
-│  │  /v1/models            │  │
-│  │  /health               │  │
-│  └──────────┬─────────────┘  │
-│             │                │
-│  ┌──────────▼─────────────┐  │
-│  │ Provider Abstraction   │  │  Interface + Base + per-provider Client
-│  └──────────┬─────────────┘  │
-│             │                │
-│  ┌──────────▼─────────────┐  │
-│  │ Browser Manager (rod)  │  │  Launch, stealth, human behavior, page pool (mutex now, pool future)
-│  └──────────┬─────────────┘  │
-└─────────────┼────────────────┘
-              │
-              ▼
-     Real Chromium (persistent profile at ./browser_data/<provider>)
-              │
-              ▼
-   chatgpt.com | claude.ai | chat.qwen.ai | chat.deepseek.com
-              │
-              ▼
-   Response scraped → normalized to OpenAI JSON → SSE or JSON returned
+┌──────────────────────────────────────────────┐
+│  Chimera Gateway (Go, chi)         :8000     │
+│  /v1/chat/completions · /v1/responses        │
+│  /v1/models · /v1/refresh · /v1/usage        │
+│  /v1/health/providers · /metrics             │
+│  auth · rate limit · quotas · SSE · MCP      │
+└───────────────┬──────────────────────────────┘
+                │  providerForModel(model)
+                ▼
+┌──────────────────────────────────────────────┐
+│  Provider abstraction (one per vendor)       │
+│                                              │
+│  TRANSPORT=webapi (preferred)                │
+│    replay the vendor's HTTP API over net/http│
+│    storage-state session (auth_data/*.json)  │
+│    anti-bot solved in-process in Go          │
+│    no browser process, ~24 MB, 1–2 s turns   │
+│                                              │
+│  TRANSPORT=dom (fallback / claude)           │
+│    real Chromium via rod                     │
+│    stealth + human pacing + selectors        │
+│    ~1.1 GB, 10–20 s turns                    │
+└───────────────┬──────────────────────────────┘
+                ▼
+  chatgpt.com · chat.deepseek.com · chat.qwen.ai
+  kimi.ai · chatglm.cn · gemini.google.com · grok.com
+  claude.ai (dom only)
 ```
 
-### Data Flow (single chat completion)
+`TRANSPORT=auto` prefers the browserless path when an exported session exists,
+falls back to the DOM on WAF/auth failure, and counts every downgrade as
+`chimera_transport_fallback_total`.
+
+### Data flow (one browserless turn)
 
 ```
 1. POST /v1/chat/completions  {messages, tools, stream}
-2. buildPrompt() → concatenates history + injects tool-calling system prompt (if tools present)
-3. Provider.SendMessage(text, threadID)
-   a. RandomDelay (400-1500ms human pause)
-   b. FindElement(ChatInput) via selector fallback list
-   c. Click + Page.InsertText(paste)
-   d. RandomDelay + Click SendButton || Press Enter
-   e. WaitForResponse:
-        Phase1: poll for StopButton appearance (streaming started)
-        Phase2: poll for StopButton disappearance (streaming done)
-        Fallback: text stability (4 consecutive identical polls) — used for Qwen/DeepSeek
-        Special: Claude data-is-streaming attribute
-   f. Sleep 1s DOM settle
-   g. ExtractLastResponseText via querySelectorAll(AssistantMessage) → innerText of last node
-   h. Echo detection: if response contains prefix of user prompt → retry after 3s
-   i. Return ProviderResponse{Message, ThreadID, ElapsedMs}
-4. API layer: tools.ParseToolCalls(text) if tools requested → []ToolCall
-5. Respond: JSON or SSE chunks (20 chars/chunk, 10ms throttle, [DONE] terminator)
+2. buildPrompt() flattens messages and injects the tool schema block (turn 1)
+3. provider.SendMessage(text, threadID)
+   a. load the storage-state session        (auth_data/<provider>.json, 0600)
+   b. solve the vendor's anti-bot gate      (PoW, nonce, header signature)
+   c. POST the vendor's chat endpoint       (cookie jar + bearer)
+   d. stream-parse the vendor's SSE/frames  (fixtures-tested state machine)
+   e. self-heal stale conversations         (fresh thread, one retry)
+4. API layer: tools.ParseToolCalls(text) if tools were requested
+5. Respond: JSON, or SSE chunks (delta routing: turn 2+ carries only the new
+   tool result — see §4)
 ```
 
 ---
@@ -68,149 +71,188 @@ Client (OpenAI SDK / LangChain / curl / any OpenAI client)
 ## 2. Module Map
 
 ```
-cmd/chimera/main.go          Entry, banner, config.Load(), browser.Launch(), provider.Init(), http.Server + graceful shutdown
-internal/config/config.go    Env + .env loading, Validate(provider), ProviderURL(), BrowserDataPath(), EnsureDirs()
-internal/logging/logging.go  Leveled logger (debug/info/warn/error + Info/Warn aliases), stderr + file tee
-internal/browser/
-  manager.go                 Persistent Chromium via go-rod/launcher, UserDataDir, headful by default, jittered viewport, lock-file cleanup, NewPage()
-  stealth.go                 navigator.webdriver=false, fake plugins/languages, chrome.runtime, WebGL vendor, canvas fingerprint, permissions override
-  human.go                   HumanBehavior: RandomDelay, TypeTextFast via JS insertText, Click with hover+offset, PressEnter, jittered MoveMouse
-internal/models/openai.go    OpenAI-compatible schemas: ChatCompletionRequest/Response, Streaming Chunk, Tool, ToolCall, ProviderResponse, ModelList
-internal/tools/calling.go    Prompt engineering for tool calling:
-                               - BuildToolPrompt(provider) → provider-specific system prompt
-                               - ParseToolCalls → brace-depth tracker (handles nested JSON + code fences)
-                               - StripToolPrompt, IsToolCallResponse, TrimNonJSON
+cmd/chimera/                  the gateway binary
+  main.go                     config.Load, transport selection, http.Server, MCP mode
+  up.go                       `chimera up [provider|all]` + argv[0] dispatch (chimera-kimi)
+  auth.go                     `chimera auth login|status|check|import|verify` (session harvest)
+  doctor.go                   `chimera doctor` local install health check
+cmd/chimera-spin/             headless harness (stdlib-only HTTP client)
+cmd/chimera-chat/             TUI harness (bubbletea)
+internal/api/server.go        chi router, auth, rate limit, quota, SSE, delta routing,
+                              tool-call parsing, metering + transcript recording
 internal/providers/
-  provider.go                Interface Provider {Name, ModelID, Init, SendMessage, NewChat, ExtractResponse, IsLoggedIn}
-  base.go                    Shared: FindElement (fallback list), FindElementExists, WaitForResponse, CountAssistantMessages (gson Value.Int), ExtractLastResponseText, RandomDelay, IsLoggedIn, ScrollToBottom
-  chatgpt/client.go+selectors.go   Model chimera-chatgpt, stop/copy/button selectors, text stability fallback not needed, echo check
-  claude/client.go+selectors.go    Model chimera-claude, data-is-streaming detector, ProseMirror selectors
-  qwen/client.go+selectors.go      Model chimera-qwen, textarea selectors, Chinese + English arias, text stability fallback
-  deepseek/client.go+selectors.go  Model chimera-deepseek, similar to qwen
-internal/api/server.go       chi router, middleware (RequestID, RealIP, Logger, Recoverer, Heartbeat /health, Bearer auth, rate limiter, CORS-ish), mutex-guarded provider calls, SSE streaming, token estimation, tool-call wiring
+  provider.go                 Provider interface + QuotaReporter (optional quota)
+  base.go                     shared DOM helpers (FindElement fallback lists, wait/extract)
+  fallback.go                 Fallback wrapper: primary retry → secondary transport
+  webapi/
+    webapi.go                 registry (webapi.Register in init()), error vocabulary
+    session.go                storage-state session load/write (0600, atomic)
+    convs.go                  bounded thread→conversation cache (FIFO eviction)
+    <vendor>/                 one package per browserless transport (client + provider)
+internal/providers/<vendor>/  DOM transports: client.go + selectors.go
+internal/browser/             manager.go (launch/stealth), pool.go (pooled pages), human.go
+internal/models/              OpenAI request/response/chunk schemas
+internal/tools/calling.go     tool prompt injection + brace-depth JSON parser
+internal/mcp/                 MCP stdio server (hand-rolled JSON-RPC 2.0)
+internal/meter/store.go       SQLite usage ledger + monthly quotas
+internal/telemetry/           Prometheus metrics + login-health snapshots
+internal/session/manager.go   X-Session-Id → conversation URL continuity (DOM)
+internal/sessions/            transcript vault: list/show/export/search/rehydrate
+internal/spin/                harness core: client, runner, tools, ledger, recorder
+internal/auth/keys.go         multi-tenant token registry
+internal/config/config.go     env + .env loading, validation, paths
 ```
 
 ---
 
 ## 3. Provider Abstraction
 
-All providers satisfy `providers.Provider`. The choice is `PROVIDER=chatgpt|claude|qwen|deepseek` (env).
+Every transport implements `providers.Provider`:
 
-Each provider:
+```go
+Name() string; ModelID() string
+Init(page *rod.Page, cfg *config.Config) error        // page is nil on webapi
+SendMessage(text, threadID string) (*models.ProviderResponse, error)
+NewChat() error; ExtractResponse() (string, error); IsLoggedIn() (bool, error)
+```
 
-- embeds `*providers.Base` (page, cfg, human, log)
-- defines own `selectors.go` with ordered fallback lists:
-  ```go
-  var ChatInput = []string{"#prompt-textarea", "div[contenteditable='true'][id='prompt-textarea']", ...}
-  ```
-  `_find` tries each with short timeout → first match wins. When vendors change UI, only `selectors.go` needs edit.
+Optional capabilities are asserted, never required:
 
-| Provider | Input selector flavor | Send | Stop detector | Extract |
-|---|---|---|---|---|
-| ChatGPT | `div[contenteditable]` `#prompt-textarea` | `button[data-testid='send-button']` | `button[data-testid='stop-button']` | `div[data-message-author-role='assistant']` |
-| Claude | `div.ProseMirror` `[aria-label*='Reply']` | `button[aria-label='Send Message']` | `data-is-streaming` attribute | `[data-is-streaming] .font-claude-message` |
-| Qwen | `textarea[placeholder]` `textarea` | `button[aria-label='发送']` + submit | stop button → text stability fallback | `div[data-role='assistant']` |
-| DeepSeek | `textarea` | `div[class*='send'] button` | stop button → text stability fallback | same |
+- `providers.Browserless` — exempts the transport from the DOM send-button
+  prompt-length guard (`MAX_PROMPT_CHARS`).
+- `providers.QuotaReporter` — surfaces a cached vendor quota on
+  `/v1/health/providers` (Grok).
+- `interface{ SessionExpiry() (time.Time, bool) }` — drives the expiry warning.
 
-`WaitForResponse` vs `waitForTextStability`:
+### Browserless transports (`internal/providers/webapi/<vendor>`)
 
-- **Stop lifecycle** (Chimera primary): poll for stop button to appear then vanish. Works when vendor shows a “Stop generating” button.
-- **Claude streaming attr**: `document.querySelector('[data-is-streaming]')` boolean.
-- **Text stability** (Qwen/DeepSeek fallback): poll `innerText` of last assistant node; if unchanged for 4×500ms, consider complete. Handles vendors without visible stop button.
+Each vendor package speaks its own wire protocol and registers itself via
+`webapi.Register(name, ctor)` in `init()`; `cmd/chimera` blank-imports
+`webapi/all`, so adding a vendor never touches the API layer.
 
-**Echo recovery**: after extraction, if response contains leading 50 chars of user prompt or tool markers (`Available functions:`), wait 3s and re-extract. Mirrors Chimera's echo detection.
+| Provider | Credential (auth_data) | Anti-bot gate | Continuity |
+|---|---|---|---|
+| chatgpt | cookie jar, bearer minted per session | SHA3-512 Sentinel PoW + requirements token | `conversation_id` + parent message id |
+| deepseek | `userToken` bearer | Keccak-256 `DeepSeekHashV1` | chat session id + parent id (self-heals `biz_code 26`) |
+| kimi | rotated refresh JWT (kimi.ai) | none — Connect framing only | native `chat_id` + `parent_id` |
+| glm | rotated refresh token (chatglm.cn) | MD5 header signature (static public secret) | native server-side `conversation_id` |
+| gemini | cookie jar (1PSID + rotating 1PSIDTS) | `SNlM0e` nonce + SAPISIDHASH | three-id continuation triple |
+| grok | `sso` cookie JWT | statsig-id fallback header | transcript folding (model side is stateless) |
+| qwen | JWT + refresh cookie | request signing (completions captcha-blocked — see README) | chat id + parent id |
+
+All conversation maps are bounded (`webapi.ConvStore`, FIFO eviction) and every
+transport self-heals a stale continuation by retrying once on a fresh thread.
+
+### DOM transports (`internal/providers/<vendor>`)
+
+Selectors live in per-provider `selectors.go` as ordered fallback lists; the
+first hit wins inside `SELECTOR_TIMEOUT`. When a vendor ships a UI redesign,
+only that file changes. Stop-detection is stop-button lifecycle, Claude's
+`data-is-streaming` attribute, or text-stability polling (4×500 ms) as a
+fallback. Echo detection re-extracts after 3 s when a response repeats the
+prompt. Every first-choice miss increments `chimera_selector_fallback_total`.
 
 ---
 
 ## 4. OpenAI Compatibility Layer
 
-- **Endpoint** `POST /v1/chat/completions` accepts standard `ChatCompletionRequest` (model, messages, stream, tools, tool_choice, temperature, etc.). Multimodal `content` may be string or `[{type:text,...},{type:image_url,…}]` → `UnmarshalContent()` concatenates text parts (images/files are TODO: upload via hidden `<input type=file>` as Chimera does).
-
-- **Tool calling**: no native browser API → prompt injection. `tools.BuildToolPrompt` injects function signatures into system prompt; model is instructed to output `{"tool_calls":[{"name":…, "arguments":{…}}]}` in a JSON code fence or bare JSON. `tools.ParseToolCalls` extracts with brace-depth tracker (handles escaped strings, nested objects). `tool_choice` is mapped to prompt phrasing (`auto`/`required`/`none`/specific function).
-
-- **Streaming**: true browser streaming is not exposed via CDP; gateway emulates SSE by fetching full response then emitting 20-char chunks at 10ms intervals + initial `role:assistant` chunk + final `finish_reason:stop` + `data: [DONE]`. Compatible with `openai` Python/JS SDKs and LangChain.
-
-- **Models**: `GET /v1/models` returns single entry `{id: provider.ModelID(), owned_by: provider.Name()}`. Model field in request is ignored except for logging (mirrors Chimera's `Chimera-browser` / `claude-browser`).
-
-- **Auth**: `Authorization: Bearer <API_TOKEN>` or `x-api-key`/`anthropic-api-key`. Empty token disables auth (like Chimera). Skips `/`, `/health`.
-
-- **Rate limiting**: token-bucket `rate.NewLimiter(1 / RATE_LIMIT_SECONDS)`. Returns 429 when exceeded.
-
-- **Concurrency**: single `rod.Page` → DOM cannot handle parallel writes. `Server.mu sync.Mutex` serializes `SendMessage` (including streaming). Chimera uses `BrowserPagePool` (multiple tabs); Chimera's mutex is the lightweight v1 equivalent. Future: page pool with round-robin + `x-session-id` sticky routing (see Roadmap).
+- **Endpoints**: `POST /v1/chat/completions`, `POST /v1/responses`,
+  `GET /v1/models`, `POST|GET /v1/refresh` (reset upstream threads),
+  `GET /v1/usage` (per-tenant metering), `GET /v1/health/providers`
+  (login + quota snapshot), `GET /metrics` (Prometheus), `/health`.
+- **Auth**: `Authorization: Bearer`, `x-api-key`, or `anthropic-api-key`;
+  single `API_TOKEN` or multi-tenant `API_TOKENS=tenant=token,…`. Empty
+  disables auth. Monthly quotas return a real `429 quota_exceeded`.
+- **Tool calling**: no native function-calling on these surfaces — schemas are
+  injected into the prompt, the brace-depth parser extracts
+  `{"tool_calls":[...]}` from code fences or bare JSON, names are validated
+  against the requested defs (hallucinations are dropped and counted), and IDs
+  are `call_<hex>`. Tool results fold into the next turn.
+- **Stateful delta routing**: a stateless client that re-sends growing history
+  is recognised by a stable digest of the conversation opening; when the
+  upstream conversation already holds that prefix, only the delta is sent.
+  `X-Session-Id` names a conversation explicitly and wins over inference.
+- **Streaming**: SSE with `chat.completion.chunk` deltas, tool-call deltas when
+  calls are parsed, and a `[DONE]` terminator. Chunks are emitted rune-safe so
+  multi-byte UTF-8 is never split across events.
+- **Pooled mode** (`PROVIDER=all`): one gateway routes by `chimera-*` model id;
+  per-provider mutexes serialize turns per vendor (their accounts are
+  single-stream by design) while distinct providers run in parallel.
+- **MCP stdio mode** (`chimera --mcp`): the same providers served as Model
+  Context Protocol tools (`chat`, `refresh`, `providers`) over JSON-RPC 2.0;
+  stdout carries protocol bytes only, and stdout purity is enforced by test.
 
 ---
 
-## 5. Browser Automation Hardening (from Chimera)
+## 5. Browser Automation Hardening (DOM substrate)
 
-| Technique | Chimera (Go/rod) | Chimera (Python/Patchright) |
-|---|---|---|
-| Persistent profile | `launcher.UserDataDir(browser_data/<provider>)` | `launch_persistent_context` |
-| SingletonLock cleanup | `cleanLockFiles()` on launch | same |
-| Viewport jitter | `1280±20 × 720±20` per launch | same |
-| Webdriver mask | `Object.defineProperty(navigator,'webdriver',…)` | `playwright-stealth` add_init_script |
-| Plugins/languages spoof | fake `navigator.plugins`, `languages` | stealth lib |
-| Headful default | `Headless=false` (anti-bot) | same |
-| Human delays | `ThinkingPauseMin/Max` 400-1500ms + typing 30-120ms | 500-1200ms + 300-600ms |
-| Paste vs type | `Page.InsertText` (paste for contenteditable) | `keyboard.insert_text` |
-| Click hover | offset ±5px, hover then click | same |
-| Stealth re-injection | `applyStealth(page)` after nav; could hook `framenavigated` for Docker DNS case | `page.evaluate` workaround for Docker DNS |
-| DNS pre-resolve | not yet (Docker entrypoint can pre-resolve chatgpt.com etc. via socket) | Python socket hosts injection |
+| Technique | Implementation |
+|---|---|
+| Persistent profile | `launcher.UserDataDir(browser_data/<provider>)` |
+| Singleton lock cleanup | stale lock/WAL/journal files removed on launch |
+| Viewport jitter | `1280±20 × 720±20` per launch |
+| Webdriver mask | `navigator.webdriver=false`, plugins/languages/WebGL spoofing |
+| Headful default | `HEADLESS=false` (anti-bot); headless opt-in |
+| Human pacing | typing 30–120 ms/char, thinking pauses 400–1500 ms, paste via `InsertText` |
+| Selector fallbacks | ordered lists per element, first hit wins, misses counted |
+| DNS hardening | Docker entrypoint pre-resolves vendor domains + host-resolver-rules |
 
 ---
 
 ## 6. Configuration
 
-All via env + `.env` (godotenv). See `.env.example:61`:
+All via env + `.env` (godotenv). See [`.env.example`](.env.example) for the
+annotated set. The ones you meet first:
 
-- `PROVIDER`, `BROWSER_DATA_DIR`, `HEADLESS`, `SLOW_MO`
-- `CHATGPT_URL`, `CLAUDE_URL`, `QWEN_URL`, `DEEPSEEK_URL`
-- `RESPONSE_TIMEOUT=120s`, `SELECTOR_TIMEOUT=10s`
-- `TYPING_SPEED_MIN/MAX`, `THINKING_PAUSE_MIN/MAX`
-- `API_HOST/PORT`, `RATE_LIMIT_SECONDS`, `API_TOKEN`
-- `LOG_DIR/LEVEL/VERBOSE`
-
-`config.Load()` ensures dirs, validates provider.
+| Variable | Default | Purpose |
+|---|---|---|
+| `PROVIDER` | `chatgpt` | `chatgpt` `claude` `qwen` `deepseek` `kimi` `gemini` `grok` `glm` `all` |
+| `TRANSPORT` | `auto` | `auto` `dom` `webapi` |
+| `TRANSPORT_FALLBACK` | empty | `dom` keeps a warm Chromium fallback beside webapi |
+| `AUTH_DIR` | `./auth_data` | storage-state sessions (0600, password-equivalent) |
+| `API_PORT` / `API_TOKEN(S)` | `8000` / off | listen port, single or multi-tenant auth |
+| `RESPONSE_TIMEOUT` | `120s` | per-turn budget |
+| `MAX_PROMPT_CHARS` | `12000` | DOM pre-flight guard (browserless exempt) |
+| `METER_DB` / `QUOTA_MONTHLY_REQUESTS` | on / `0` | SQLite ledger + monthly quota |
+| `SESSIONS_DIR` | `~/.local/share/chimera/sessions` | local transcript vault |
 
 ---
 
 ## 7. Deployment Topologies
 
 ### Local binary
+
 ```
-cp .env.example .env   # set PROVIDER + API_TOKEN
-go build -o chimera ./cmd/chimera
-./chimera              # launches headful Chromium, needs display
-# headless alternative: HEADLESS=true ./chimera
-curl -H "Authorization: Bearer chimera" http://localhost:8000/v1/models
+chimera auth login chatgpt     # one browser login, session stored 0600
+chimera up                     # every backend with a session, :8000–8011
 ```
 
-### Docker (planned, mirroring Chimera)
-```
-FROM golang:1.23 AS builder → build static binary
-FROM debian:bookworm-slim → install chromium, xvfb, x11vnc, novnc, supervisord
-COPY --from=builder /app/chimera /usr/local/bin/
-# supervisord runs: Xvfb :99, x11vnc :5900, noVNC :6080, chimera :8000
-docker compose up --build -d
-open http://localhost:6080/vnc.html  # one-time login
-open http://localhost:8000/health
-```
-Xvfb avoids focus-stealing when launched via agent; noVNC gives remote login without RDP.
+### Docker
+
+Two image targets from one `Dockerfile`:
+
+- **`--target slim`** — `distroless/static-debian12:nonroot`, ~22 MB,
+  `TRANSPORT=webapi`, `/app/auth_data` + `/app/logs` volumes, built-in
+  `-healthcheck`. No Chromium, no shell.
+- **`browser`** (default) — Debian + Chromium + Xvfb + x11vnc + noVNC +
+  supervisord for the DOM substrate and one-time VNC login
+  (`docker compose up`, then `http://localhost:6080/vnc.html`).
 
 ### Kubernetes (future)
-Single replica per provider (browser is stateful, not horizontally scaled without page pool). Use PVC for `browser_data`, readinessProbe on `/health`.
+
+Single replica per provider; sessions are stateful, so scale by adding
+gateways per account, not replicas per account. Readiness on `/health`,
+PVC for `auth_data` and `browser_data`.
 
 ---
 
 ## 8. Known limitations
 
-- Latency 10–20s per request on the browser path (real browser round-trip);
-  1–3s on the browserless transports.
-- Sessions expire days/weeks → re-login volume.
-- UI selectors are brittle on the browser path → centralized in
-  `selectors.go`.
-- Tool calling via prompting is reliable for 1–7 tools; complex schemas may
-  need a retry.
-- Single page concurrency → serialized; a true multi-tab pool is future work.
-- Vision/file attachments are scaffolded but not yet wired to
-  `ContentPart.image_url` extraction.
-
+- Browserless turns ~1–2 s p50; DOM turns 10–20 s (real page round-trip).
+- Sessions expire on the vendor's clock (days–weeks observed); re-login is
+  interactive by design — Chimera never automates human captchas.
+- Per-provider serialization caps throughput at one active turn per account.
+- Selectors rot on the DOM path; that is measurable
+  (`chimera_selector_fallback_total`) and fixed in `selectors.go`, not invisible.
+- Tool calling is prompt engineering: reliable for a handful of tools, not
+  arbitrary schemas. Vision and file attachments are scaffolded, not wired.

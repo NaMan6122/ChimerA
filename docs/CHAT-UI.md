@@ -15,8 +15,9 @@ Everything below assumes the browserless gateway from the
 
 ```bash
 cd ~/chimera
-chimera auth login chatgpt      # or deepseek, gemini; opens a browser once
-TRANSPORT=webapi PROVIDER=chatgpt API_PORT=8000 API_TOKEN=chimera chimera
+chimera auth login chatgpt      # or deepseek, qwen, kimi, glm, gemini, grok; opens a browser once
+chimera up                      # starts every backend with a session, :8000–8011
+chimera doctor                  # pre-flight: sessions, ports, disk, .env (never prints secrets)
 ```
 
 Endpoint shapes and auth header forms: [`docs/API.md`](API.md).
@@ -81,8 +82,8 @@ Browserless serves **one provider per gateway process**. To chat with two
 subscriptions in one UI, run two gateways on two ports:
 
 ```bash
-TRANSPORT=webapi PROVIDER=chatgpt   API_PORT=8000 API_TOKEN=chimera chimera &
-TRANSPORT=webapi PROVIDER=deepseek  API_PORT=8010 API_TOKEN=chimera chimera &
+chimera up chatgpt    # or: chimera up deepseek, chimera up kimi, …
+# explicit form: TRANSPORT=webapi PROVIDER=chatgpt API_PORT=8000 API_TOKEN=chimera chimera &
 ```
 
 Open WebUI takes several base URLs at once via `OPENAI_API_BASE_URLS`
@@ -96,7 +97,8 @@ Browserless coverage as of this writing, checked against the source:
 | DeepSeek | `chimera-deepseek` | ✅ |
 | Gemini | `chimera-gemini` | ✅ |
 | Qwen | `chimera-qwen` | ⚠️ captcha-blocked — [README known issues](../README.md#known-issues) |
-| Claude, Kimi | `chimera-claude`, `chimera-kimi` | — DOM transport only |
+| Kimi | `chimera-kimi` | ✅ (Connect-RPC + rotated refresh token, kimi.ai) |
+| Claude | `chimera-claude` | — DOM transport only |
 | Grok | `chimera-grok` | ✅ live-verified (cookie custody; model side is stateless — see the README matrix note) |
 | GLM (Zhipu) | `chimera-glm` | ✅ live-verified (refresh-token custody + MD5 header-signature, native conversation continuity) |
 
@@ -219,6 +221,7 @@ is ~1–2 s; on the browser path 10–20 s
 | `429 rate limit exceeded` | global token bucket: 1 request per `RATE_LIMIT_SECONDS` (default 2) | UIs fire side requests (titles, tags) around each message; raise the interval for headroom or set `RATE_LIMIT_SECONDS=0` to disable while testing |
 | `400 … message_too_long` | `MAX_PROMPT_CHARS` guard (12000 chars) — browser transport only | the browserless path is exempt; this reaches you when `TRANSPORT=auto` fell back to the browser |
 | long pause, then an error appears as the reply | provider failure after SSE headers were committed → HTTP 200 with the error inside the stream ([README known issue 2](../README.md#known-issues)) | read the reply body and the gateway logs; if it names auth, re-export the session |
+| anything else unclear | — | run `chimera doctor --probe`: it checks session files (expiry, never values), gateway ports, disk, `.env` keys, and each listening gateway's `/v1/health/providers` |
 
 ---
 

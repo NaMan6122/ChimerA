@@ -18,7 +18,7 @@ Unauthenticated. Docker / K8s probe.
 Gateway info.
 
 ```json
-{"name":"Chimera Gateway","version":"0.1.0","status":"running","provider":"chatgpt"}
+{"name":"Chimera Gateway","version":"0.4.0","status":"running","provider":"chatgpt"}
 ```
 
 ### `GET /v1/health/providers`
@@ -57,10 +57,14 @@ curl -H "Authorization: Bearer chimera" http://localhost:8000/v1/models
   "data":[{"id":"chimera-chatgpt","object":"model","owned_by":"chatgpt"}]
 }
 ```
-Model IDs: `chimera-chatgpt`, `chimera-claude`, `chimera-qwen`, `chimera-deepseek`. Any `model` sent in chat completions is accepted and logged.
+Model IDs: `chimera-chatgpt`, `chimera-claude`, `chimera-qwen`, `chimera-deepseek`,
+`chimera-kimi`, `chimera-gemini`, `chimera-grok`, `chimera-glm`. Unknown `model`
+values are accepted and routed to the default provider (logged, never rejected).
 
 ### `POST /v1/chat/completions`
-Core endpoint. Mirrors OpenAI Chat Completions. Browser round-trip is 10–20s; the browserless qwen transport is 3–8s. Streaming is emulated after full response.
+Core endpoint. Mirrors OpenAI Chat Completions. Browserless turns land in
+~1–2 s (p50 measured on DeepSeek); DOM turns take 10–20 s. Streaming emits
+OpenAI-format chunks with a `[DONE]` terminator.
 
 #### Request
 
@@ -127,7 +131,7 @@ Since no native function-calling CDP, Chimera injects:
 
 - For ChatGPT: `"You are in tool-calling mode. You have access to… output ONLY {\"tool_calls\":…}"`
 - For Claude: `"You have access to external tools through a structured interface…"`
-and parses the model's JSON output via `tools.ParseToolCalls`. Returned as standard OpenAI `tool_calls` with `call_1`, `call_2` IDs. Next turn you send back `{"role":"tool","tool_call_id":"call_1","content":"Sunny, 25C"}` which is folded into `Tool result (call_1): Sunny, 25C` in the prompt.
+and parses the model's JSON output via `tools.ParseToolCalls`. Returned as standard OpenAI `tool_calls` with unique `call_<hex>` IDs; names are validated against the requested defs, so hallucinated calls are dropped (counted in `chimera_tool_name_reject_total`) instead of reaching your client. Next turn you send back `{"role":"tool","tool_call_id":"call_abc123","content":"Sunny, 25C"}` which is folded into `Tool result (call_abc123): Sunny, 25C` in the prompt.
 
 #### cURL examples
 
@@ -187,6 +191,37 @@ curl -X POST http://localhost:8000/v1/responses \
 
 ---
 
+### `POST /v1/refresh`
+
+Starts a fresh upstream conversation for a provider, discarding thread state.
+Recover from stale conversations without a restart. Targets `?model=` / `?provider=`,
+or a JSON body `{"model":"chimera-qwen"}`; defaults to the active provider.
+
+```json
+{"status":"ok","provider":"qwen","model":"chimera-qwen","elapsed_ms":412}
+```
+
+### `GET /v1/usage`
+
+Per-tenant usage over an inclusive window (`from`/`to` RFC3339; default: the
+current UTC month). Requires metering (`METER_DB` set); `503 metering_disabled`
+otherwise. Callers only ever see their own tenant.
+
+```json
+{"object":"usage","tenant":"acme","requests":42,"prompt_chars":9130,
+ "completion_chars":180224,"errors":0,"by_provider":{"deepseek":30,"chatgpt":12},
+ "quota_monthly":10000}
+```
+
+### `GET /metrics`
+
+Prometheus exposition (unauthenticated like `/health`; front with a reverse
+proxy in multi-tenant deploys). Covers request outcomes, response/lock-wait
+histograms, transport fallbacks, PoW solve durations, and the
+selector-fallback radar. Grafana dashboard and alert rules ship in `docker/`.
+
+---
+
 ## Auth & Rate Limit
 
 - All `/v1/*` require Bearer token if `API_TOKEN` set; `/health` and `/` are open.
@@ -197,7 +232,10 @@ curl -X POST http://localhost:8000/v1/responses \
 
 ## Headers & Sessions
 
-- `x-session-id` (future): stick to a tab in the page pool for multi-turn coherence without reloads. v1 serializes on single page; header is reserved.
+- `x-session-id` / `x-thread-id` (active): pins one upstream conversation.
+  A stateless client that re-sends growing history is recognised by its
+  conversation opening and only the new delta is sent upstream — turn 2 of a
+  48k-char transcript carries ~400 chars, not the whole history.
 - `Content-Type: application/json` required.
 
 ---
@@ -206,18 +244,26 @@ curl -X POST http://localhost:8000/v1/responses \
 
 | Code | Body | When |
 |------|------|------|
-| 401 | `{"error":"unauthorized"}` | bad/missing Bearer |
-| 429 | `{"error":"rate limit exceeded…"}` | bucket empty |
-| 400 | `{"error":"messages array is required"}` / `invalid request` | bad JSON / missing user message |
-| 500 | `{"error":"provider error: …"}` | browser nav, selector, timeout |
+| 400 | `invalid_request` | bad JSON, missing user message, bad usage window |
+| 400 | `message_too_long` | DOM pre-flight guard (`MAX_PROMPT_CHARS`; browserless exempt) |
+| 400 | `streaming_unsupported` | `stream:true` on `/v1/responses` |
+| 401 | `unauthorized` | bad/missing Bearer |
+| 429 | `rate_limit_exceeded` | global token bucket empty |
+| 429 | `quota_exceeded` | tenant's monthly `QUOTA_MONTHLY_REQUESTS` exhausted |
+| 500 | `provider_error` | provider failure mid-turn |
+| 504 | `provider_busy` | provider lock held past the timeout budget |
 
 ---
 
 ## Provider Model Matrix
 
-| Env PROVIDER | Model ID | Upstream URL | Vision | Files | Image gen |
-|--------------|----------|--------------|--------|-------|-----------|
-| chatgpt | chimera-chatgpt | https://chatgpt.com | TODO | TODO | via DOM scrape (planned) |
-| claude | chimera-claude | https://claude.ai | TODO | TODO | 501 for now |
-| qwen | chimera-qwen | https://chat.qwen.ai | TODO | TODO | — |
-| deepseek | chimera-deepseek | https://chat.deepseek.com | TODO | TODO | — |
+| Env PROVIDER | Model ID | Transport | Vision | Files | Image gen |
+|--------------|----------|-----------|--------|-------|-----------|
+| chatgpt | chimera-chatgpt | webapi + dom | TODO | TODO | via DOM scrape (planned) |
+| claude | chimera-claude | dom | TODO | TODO | 501 for now |
+| qwen | chimera-qwen | webapi ⚠️ + dom | TODO | TODO | — |
+| deepseek | chimera-deepseek | webapi + dom | TODO | TODO | — |
+| kimi | chimera-kimi | webapi + dom | TODO | TODO | — |
+| gemini | chimera-gemini | webapi | TODO | TODO | — |
+| grok | chimera-grok | webapi | TODO | TODO | — |
+| glm | chimera-glm | webapi | TODO | TODO | — |
