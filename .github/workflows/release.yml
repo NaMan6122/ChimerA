@@ -1,16 +1,11 @@
 # Release pipeline: push a v* tag and everything below happens automatically.
-#   git tag v0.4.0 && git push origin v0.4.0
+#   git tag v0.4.1 && git push origin v0.4.1
 #
 # scripts/dist.sh cross-compiles all three binaries for darwin/linux
-# (amd64+arm64) plus a windows zip, writes checksums.txt and generates the
-# Homebrew formula, and this workflow publishes the set as a GitHub release
-# and pushes the formula into the tap, so `brew upgrade` sees the new version
-# without a manual copy step (see docs/DISTRIBUTION.md).
-#
-# The tap push needs a TAP_TOKEN secret: a fine-grained PAT with
-# contents:write on NaMan6122/homebrew-chimera. Without it the step is
-# skipped with a warning and the release still succeeds — the formula is
-# attached to the release either way, so the tap can be updated by hand.
+# (amd64+arm64) plus windows (amd64+arm64) zips, writes checksums.txt and
+# generates the Homebrew formula, and this workflow verifies the test suite,
+# publishes the set as a GitHub release, and (for stable tags) pushes the
+# formula into the tap so `brew upgrade` sees the new version automatically.
 name: release
 
 on:
@@ -21,24 +16,49 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: vet & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet
+        run: CGO_ENABLED=0 go vet ./...
+      - name: Test (race)
+        run: go test -race ./...
+
   release:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
+          cache: true
 
-      - name: Build release artifacts
-        run: ./scripts/dist.sh
+      - name: Build & smoke-test release artifacts
         env:
           CHIMERA_VERSION: ${{ github.ref_name }}
+        run: |
+          ./scripts/dist.sh
+          ruby -c dist/chimera.rb
+          CHIMERA_FROM_DIR=dist CHIMERA_PREFIX=/tmp/chimera-smoke ./install.sh --quiet
+          /tmp/chimera-smoke/bin/chimera -version | grep -Fq "$CHIMERA_VERSION"
+          /tmp/chimera-smoke/bin/chimera-kimi -version | grep -Fq "$CHIMERA_VERSION"
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          PRERELEASE_FLAG=""
+          case "$GITHUB_REF_NAME" in
+            *-*) PRERELEASE_FLAG="--prerelease" ;;
+          esac
           gh release create "$GITHUB_REF_NAME" \
             dist/chimera_*.tar.gz \
             dist/chimera_*.zip \
@@ -46,11 +66,13 @@ jobs:
             dist/chimera.rb \
             --title "chimera $GITHUB_REF_NAME" \
             --generate-notes \
-            --verify-tag
+            --verify-tag \
+            $PRERELEASE_FLAG
 
-      # Homebrew updates alongside the release. Runs after the release exists
-      # so a tap failure never blocks the artifacts users download.
+      # Homebrew updates alongside stable releases only so pre-release RC tags
+      # never promote onto `brew upgrade`.
       - name: Update Homebrew tap
+        if: "!contains(github.ref_name, '-')"
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
           VERSION: ${{ github.ref_name }}
