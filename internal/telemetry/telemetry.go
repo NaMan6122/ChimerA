@@ -194,8 +194,10 @@ func Handler() http.Handler { return Default.Handler() }
 // request input can never drive Prometheus cardinality.
 var knownMetricModels = map[string]struct{}{
 	"chimera-chatgpt": {}, "chimera-claude": {}, "chimera-qwen": {},
-	"chimera-deepseek": {}, "chimera-kimi": {},
-	"chatgpt": {}, "claude": {}, "qwen": {}, "deepseek": {}, "kimi": {},
+	"chimera-deepseek": {}, "chimera-kimi": {}, "chimera-gemini": {},
+	"chimera-grok": {}, "chimera-glm": {},
+	"chatgpt": {}, "claude": {}, "qwen": {}, "deepseek": {},
+	"kimi": {}, "gemini": {}, "grok": {}, "glm": {},
 }
 
 func metricModel(model string) string {

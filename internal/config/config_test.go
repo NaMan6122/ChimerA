@@ -69,3 +69,13 @@ func TestLoadMeteringDefaults(t *testing.T) {
 		t.Fatalf("default MeterDB = %q, want %q", cfg2.MeterDB, want)
 	}
 }
+
+func TestProviderURLCoversGLM(t *testing.T) {
+	c := &Config{
+		Provider: ProviderGLM,
+		GLMURL:   "https://chatglm.cn",
+	}
+	if got := c.ProviderURL(); got != "https://chatglm.cn" {
+		t.Fatalf("ProviderURL() = %q, want https://chatglm.cn", got)
+	}
+}

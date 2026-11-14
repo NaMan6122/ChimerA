@@ -389,6 +389,31 @@ func TestDoctorEnvCheckMissingFile(t *testing.T) {
 	}
 }
 
+func TestDoctorEnvCheckRecognizesV04KeysAndDotEnvExample(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	content := strings.Join([]string{
+		"GLM_URL=https://chatglm.cn",
+		"GLM_WEB_MODEL=auto",
+		"KIMI_WEB_MODEL=auto",
+		"KIMI_WEB_URL=https://www.kimi.ai",
+		"SESSIONS_DIR=/tmp/sessions",
+		"DEEPSEEK_SSE_DUMP=/tmp/ds.sse",
+		"GEMINI_DUMP=/tmp/gem.txt",
+		"GLM_DUMP=/tmp/glm.txt",
+		"KIMI_DUMP=/tmp/kimi.txt",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := checkEnvFile(path); r.Status != statusOK {
+		t.Fatalf("expected v0.4 env keys to pass doctor, got %+v", r)
+	}
+	if r := checkEnvFile(filepath.Join("..", "..", ".env.example")); r.Status != statusOK {
+		t.Fatalf(".env.example drifted from doctor knownEnvKeys: %+v", r)
+	}
+}
+
 // ── rendering ──────────────────────────────────────────────────
 
 func TestRenderDoctorSummaryCounts(t *testing.T) {
