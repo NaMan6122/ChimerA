@@ -1,0 +1,86 @@
+name: Vendor UI / wire protocol drift
+description: A provider changed their UI or wire protocol — selectors missed, a challenge changed, frames stopped parsing.
+labels: ["vendor-drift", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Vendor surfaces drift; ChimerA is built to make that measurable rather
+        than mysterious. This template turns drift reports into fixable tickets.
+
+        **Before you paste anything:** `auth_data/*.json`, cookies, tokens and
+        prompts are credential-grade. Redact them. Frame dumps and logs must be
+        scrubbed.
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options: [chatgpt, claude, qwen, deepseek, kimi, gemini, grok, glm]
+    validations:
+      required: true
+  - type: dropdown
+    id: substrate
+    attributes:
+      label: Substrate affected
+      options: [webapi (browserless), dom (Chromium), both / auto fallback triggered]
+    validations:
+      required: true
+  - type: dropdown
+    id: failure-mode
+    attributes:
+      label: Failure mode
+      options:
+        - "PoW / anti-bot gate changed (403, challenge rejected, unsolvable)"
+        - "Human CAPTCHA newly enforced (documented as out of scope if unbypassable)"
+        - "Stream / frame format changed (HTTP 200 but empty, truncated, or garbled parse)"
+        - "Auth / token refresh rejected (fails even after a fresh `chimera auth login`)"
+        - "DOM selector miss (`chimera_selector_fallback_total` incremented, or timeout)"
+        - "Something else (describe below)"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        What you observed, with telemetry: the exact error (status + redacted
+        body), relevant `/metrics` counters
+        (`chimera_transport_fallback_total`, `chimera_selector_fallback_total`,
+        `chimera_pow_solve_seconds`), and `chimera doctor --probe` output.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: |
+        Minimal steps — one `curl` against the gateway, one `chimera-spin`
+        invocation, or one `chimera auth status`.
+      placeholder: |
+        curl -H "Authorization: Bearer …" http://localhost:8000/v1/chat/completions …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: chimera -version
+      placeholder: chimera v0.4.0
+    validations:
+      required: true
+  - type: input
+    id: first-seen
+    attributes:
+      label: When did it last work?
+      placeholder: worked on v0.4.0 until 2026-11-13 evening
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Hygiene
+      options:
+        - label: I redacted all session material and prompts from evidence I am attaching
+          required: true
+        - label: I re-ran after a fresh `chimera auth login <provider>` to rule out normal session expiry
+          required: true
+        - label: I checked the Known issues section of the README
+          required: true
