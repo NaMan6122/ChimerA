@@ -166,19 +166,15 @@ func TestProviderSendMessageThreadsConversations(t *testing.T) {
 	if resp.Message != "PONG" {
 		t.Fatalf("message = %q", resp.Message)
 	}
-	p.mu.Lock()
-	conv := p.convs["session-a"]
-	p.mu.Unlock()
+	conv, _ := p.convs.Get("session-a")
 	if conv.chatID != "chat-1" || conv.parentID != "resp-1" {
 		t.Fatalf("conversation state = %+v", conv)
 	}
 	if err := p.NewChat(); err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.convs) != 0 {
-		t.Fatalf("conversations not cleared: %+v", p.convs)
+	if p.convs.Len() != 0 {
+		t.Fatalf("conversations not cleared: len=%d", p.convs.Len())
 	}
 }
 

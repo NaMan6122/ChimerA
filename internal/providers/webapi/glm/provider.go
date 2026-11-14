@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/chimera/chimera/internal/config"
@@ -34,16 +33,14 @@ type Provider struct {
 	sess   *webapi.Session
 	log    *logging.Logger
 
-	mu    sync.Mutex
-	convs map[string]string // threadID → upstream conversation_id
+	convs webapi.ConvStore[string] // threadID → upstream conversation_id
 }
 
 // New returns an uninitialized web transport; call Init before serving.
 func New(cfg *config.Config) *Provider {
 	return &Provider{
-		cfg:   cfg,
-		convs: map[string]string{},
-		log:   logging.New("glm-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
+		cfg: cfg,
+		log: logging.New("glm-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
 	}
 }
 
@@ -91,9 +88,7 @@ func (p *Provider) Init(_ *rod.Page, cfg *config.Config) error {
 // once on a new conversation — the same self-heal as Grok's stale pointer
 // and Gemini's stale triple.
 func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderResponse, error) {
-	p.mu.Lock()
-	convID := p.convs[threadID]
-	p.mu.Unlock()
+	convID, _ := p.convs.Get(threadID)
 
 	res, err := p.client.Send(text, convID)
 	if err != nil && convID != "" && !errors.Is(err, webapi.ErrSessionExpired) {
@@ -115,9 +110,7 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 		}(orphaned)
 	}
 
-	p.mu.Lock()
-	p.convs[threadID] = res.ConversationID
-	p.mu.Unlock()
+	p.convs.Set(threadID, res.ConversationID)
 
 	// Reasoning is parsed, counted, and discarded at the provider boundary —
 	// vendors do not replay it, so it never enters any working copy.
@@ -139,10 +132,11 @@ func (p *Provider) IsLoggedIn() (bool, error) {
 	return true, nil
 }
 
-// NewChat drops one thread's conversation pointer; the next turn starts a
+// NewChat forgets every conversation pointer so the next turn starts a
 // fresh upstream conversation.
 func (p *Provider) NewChat() error {
-	return nil // per-thread state lives in convs; refresh handles the rest
+	p.convs.Clear()
+	return nil
 }
 
 // ExtractResponse satisfies the DOM-shaped interface; the web transport

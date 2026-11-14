@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/chimera/chimera/internal/config"
@@ -41,16 +40,14 @@ type Provider struct {
 	sess   *webapi.Session
 	log    *logging.Logger
 
-	mu    sync.Mutex
-	convs map[string]convRef // threadID → upstream chat position
+	convs webapi.ConvStore[convRef] // threadID → upstream chat position
 }
 
 // New returns an uninitialized web transport; call Init before serving.
 func New(cfg *config.Config) *Provider {
 	return &Provider{
-		cfg:   cfg,
-		convs: map[string]convRef{},
-		log:   logging.New("kimi-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
+		cfg: cfg,
+		log: logging.New("kimi-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
 	}
 }
 
@@ -97,9 +94,7 @@ func (p *Provider) Init(_ *rod.Page, cfg *config.Config) error {
 // else starts fresh. A failed continuation retries once on a new chat — the
 // same self-heal as GLM's stale conversation and Grok's stale pointer.
 func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderResponse, error) {
-	p.mu.Lock()
-	ref := p.convs[threadID]
-	p.mu.Unlock()
+	ref, _ := p.convs.Get(threadID)
 
 	res, err := p.client.Send(text, ref.chatID, ref.parentID)
 	if err != nil && ref.chatID != "" && !errors.Is(err, webapi.ErrSessionExpired) {
@@ -110,9 +105,7 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 		return nil, err
 	}
 
-	p.mu.Lock()
-	p.convs[threadID] = convRef{chatID: res.ChatID, parentID: res.ParentID}
-	p.mu.Unlock()
+	p.convs.Set(threadID, convRef{chatID: res.ChatID, parentID: res.ParentID})
 
 	// Reasoning is parsed, counted, and discarded at the provider boundary —
 	// vendors do not replay it, so it never enters any working copy.
@@ -134,10 +127,11 @@ func (p *Provider) IsLoggedIn() (bool, error) {
 	return true, nil
 }
 
-// NewChat drops one thread's chat pointer; the next turn starts a fresh
+// NewChat forgets every chat pointer so the next turn starts a fresh
 // upstream chat.
 func (p *Provider) NewChat() error {
-	return nil // per-thread state lives in convs; refresh handles the rest
+	p.convs.Clear()
+	return nil
 }
 
 // ExtractResponse satisfies the DOM-shaped interface; the web transport
