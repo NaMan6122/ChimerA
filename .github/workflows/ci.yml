@@ -30,7 +30,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build image
+      - name: Build slim browserless image
+        run: |
+          docker build --target slim --build-arg VERSION=ci -t chimera:slim .
+          docker run --rm chimera:slim -version | grep -q "chimera ci"
+      - name: Build browser image
         run: docker build -t chimera:ci .
       - name: Smoke test image (binary + supervisord wiring)
         run: |

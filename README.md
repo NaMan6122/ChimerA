@@ -3,8 +3,9 @@
 **Your chat subscriptions, as an OpenAI-compatible API.**
 
 Point any OpenAI SDK, LangChain chain, or agent harness at Chimera and your
-ChatGPT / Qwen / DeepSeek / Claude / Kimi / Gemini login answers over `/v1` —
-no API keys, no per-token bill, and no prompts leaving the machine it runs on.
+ChatGPT / Claude / Qwen / DeepSeek / Kimi / Gemini / Grok / GLM login answers
+over `/v1` — no API keys, no per-token bill, and no prompts leaving the
+machine it runs on.
 
 ```
 Go 1.25  ·  ~21 MB static binary  ·  MIT  ·  self-host free, managed single-tenant
@@ -32,11 +33,12 @@ metrics, and no story for more than one user.
 Chimera is the other version of that:
 
 - **Zero token spend.** The subscription you already pay for becomes the backend.
-- **Models without APIs.** One OpenAI shape in front of six consumer surfaces.
+- **Models without APIs.** One OpenAI shape in front of eight consumer surfaces.
 - **Private by construction.** Prompts stay in your profile/session, not our cloud.
 - **Operable as a product.** Quotas, usage ledgers, login health, and a
   selector-fallback radar that turns vendor UI drift into an alert instead of a mystery 500.
-- **Agent-native.** OpenAI Chat Completions today; Responses, Anthropic Messages and MCP stdio specced.
+- **Agent-native.** OpenAI Chat Completions and Responses today, MCP stdio tools
+  (`chimera --mcp`) for Claude Code and Cursor; Anthropic Messages on the roadmap.
 
 ---
 
@@ -48,11 +50,12 @@ The browser is the universal fallback, not the foundation.
    Your app — OpenAI SDK · LangChain · curl · an agent
                           │
                           ▼
-        ┌─────────────────────────────────────┐
-        │  Chimera gateway  :8000  (Go, chi)  │
-        │  /v1/chat/completions · /v1/models  │
-        │  auth · rate limit · quotas · SSE   │
-        └───────────────┬─────────────────────┘
+        ┌──────────────────────────────────────────┐
+        │  Chimera gateway  :8000  (Go, chi)       │
+        │  /v1/chat/completions · /v1/responses    │
+        │  /v1/models · auth · rate limit · quotas │
+        │  SSE · /metrics · chimera --mcp          │
+        └───────────────┬──────────────────────────┘
                         │
         ┌───────────────┴──────────────────┐
         ▼                                  ▼
@@ -63,8 +66,9 @@ The browser is the universal fallback, not the foundation.
         │                                  │
         └───────────────┬──────────────────┘
                         ▼
-      chatgpt.com · chat.qwen.ai · chat.deepseek.com
-      claude.ai · kimi.com
+      chatgpt.com · chat.deepseek.com · chat.qwen.ai
+      kimi.ai · chatglm.cn · gemini.google.com · grok.com
+      claude.ai (dom only)
 ```
 
 `TRANSPORT=auto` prefers the browserless path when an exported session exists,
@@ -157,7 +161,7 @@ rather than replace.
 
 ```bash
 cd ~/chimera
-chimera auth login chatgpt      # or deepseek, qwen, kimi, glm; opens a browser once
+chimera auth login chatgpt      # or deepseek, qwen, kimi, glm, gemini, grok
 chimera up                      # start every backend you have a session for
 ```
 
@@ -168,7 +172,9 @@ use `chimera up kimi`, or the one-word form `chimera-kimi` (also
 discovers every one of them automatically.
 
 Serves in seconds, ~24 MB each, no browser process. Sessions expire after days
-to weeks; `chimera auth status` tells you when.
+to weeks; `chimera auth status` tells you when. `chimera doctor` checks the
+whole install — session files, gateway ports, disk, `.env` keys — in one
+command, never printing a secret.
 
 ### 2. Headful — the real browser, harder to detect
 
@@ -216,7 +222,7 @@ opencode, your own agent loop — keeps working.
 
 ## What you get
 
-- **One endpoint, five subscriptions.** `PROVIDER=all` routes every provider
+- **One endpoint, eight subscriptions.** `PROVIDER=all` routes every provider
   behind one gateway by `chimera-*` model id; `X-Session-Id` gives
   conversation continuity; `POST /v1/refresh` recovers a stale thread without
   a restart. Shapes: [`docs/API.md`](docs/API.md).
@@ -234,7 +240,7 @@ opencode, your own agent loop — keeps working.
   locks with timeouts, prompt-length guards, echo recovery.
 - **Agent-native.** As the model: swap the base URL. As a tool: escalate hard
   reasoning steps through MCP `chat`,
-  or let five subscriptions vote behind one call.
+  or let several subscriptions vote behind one call.
 
 ---
 
@@ -272,7 +278,7 @@ and a method, not an SLA — re-run the probe for your own.
 | Claude | `chimera-claude` | ✅ | — | chat + tools, streaming via `data-is-streaming` |
 | Qwen | `chimera-qwen` | ✅ | ⚠️ captcha-blocked (below) | DOM works; tokens auto-refresh |
 | DeepSeek | `chimera-deepseek` | ✅ | ✅ `DeepSeekHashV1` PoW | chat + text-stability fallback |
-| Kimi | `chimera-kimi` | ✅ | — | chat + text-stability fallback |
+| Kimi | `chimera-kimi` | ✅ | ✅ refresh-token custody, Connect-RPC op-stream | chat; DOM fallback uses text-stability |
 | Gemini | `chimera-gemini` | — | ✅ cookie custody, `SNlM0e` nonce, three-id continuation | chat; model `auto` takes Google's default |
 | Grok | `chimera-grok` | — | ✅ live-verified | cookie custody; model side is stateless — the provider folds the transcript, so turns re-pay context |
 | GLM (Zhipu) | `chimera-glm` | — | ✅ live-verified | refresh-token custody + one MD5 header-signature; native `conversation_id` continuity (no-history invariant holds) |
@@ -292,7 +298,7 @@ Endpoints, request/response shapes, auth header forms:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PROVIDER` | `chatgpt` | `chatgpt` `claude` `qwen` `deepseek` `kimi` `all` |
+| `PROVIDER` | `chatgpt` | `chatgpt` `claude` `qwen` `deepseek` `kimi` `gemini` `grok` `glm` `all` |
 | `TRANSPORT` | `auto` | `auto` `dom` `webapi` |
 | `API_PORT` | `8000` | listen port |
 | `API_TOKEN` / `API_TOKENS` | off | single or multi-tenant bearer auth |
@@ -328,7 +334,7 @@ VNC URL, and someone else watching the selectors.
 Starter tiers, priced by substrate rather than per token — **Subscriber API
 $9–12/mo** (browserless, 10k requests), **Browser Solo $19/mo** (5k), **Team
 $79/mo** (auto transport with warm fallback, 50k), Scale custom. Unit
-Unit economics are not published.
+economics are not published.
 
 ---
 
@@ -354,9 +360,10 @@ Documented because they are measured, not because they are ignored.
 ## Roadmap
 
 ```
-v0.4  protocols     tool-call hardening → Responses API → Anthropic Messages → MCP stdio
-v0.5  reliability   cross-provider failover → selector packs → provider supervisor
-v0.6  delight       response cache → playground → eval harness
+✅ v0.4  protocols   tool-call hardening → Responses API → MCP stdio (shipped)
+v0.5  reliability   true token streaming → Anthropic Messages (Claude Code) →
+                    browserless PROVIDER=all pool → cross-provider failover
+v0.6  delight       multi-subscription consensus → response cache → playground
 v1.0                all green + managed pilot tenants
 ```
 

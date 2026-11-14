@@ -12,7 +12,7 @@ body:
     id: provider
     attributes:
       label: Provider
-      options: [chatgpt, claude, qwen, deepseek, kimi, gemini, grok, all/other]
+      options: [chatgpt, claude, qwen, deepseek, kimi, gemini, grok, glm, all/other]
     validations:
       required: true
   - type: dropdown
@@ -44,7 +44,7 @@ body:
     id: version
     attributes:
       label: chimera -version
-      placeholder: chimera v0.1.1
+      placeholder: chimera v0.4.0
     validations:
       required: true
   - type: input
@@ -52,6 +52,14 @@ body:
     attributes:
       label: OS / arch / network
       placeholder: macOS 15 arm64, corporate network (TLS interception?)
+  - type: textarea
+    id: doctor
+    attributes:
+      label: chimera doctor --probe output (redacted)
+      description: |
+        Optional but it usually pins the cause in one paste. The command never
+        prints session values — paste as-is.
+      render: text
   - type: checkboxes
     id: hygiene
     attributes:
@@ -60,4 +68,6 @@ body:
         - label: I redacted all session material and prompts from logs I am attaching
           required: true
         - label: I checked the Known issues section of the README
+          required: true
+        - label: I re-ran after a fresh `chimera auth login <provider>` to rule out normal session expiry
           required: true

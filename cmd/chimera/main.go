@@ -65,6 +65,10 @@ func main() {
 		return
 	}
 
+	if len(os.Args) > 1 && (os.Args[1] == "-healthcheck" || os.Args[1] == "--healthcheck") {
+		os.Exit(runHealthcheck())
+	}
+
 	// `chimera up [provider|all]` starts backends without the env-var dance.
 	// A `chimera-<provider>` symlink (chimera-kimi, chimera-gpt, …) is the same
 	// thing in one word. When runUp returns true the environment is prepared and
@@ -483,6 +487,29 @@ func closeBrowsers(pool *browser.Pool, mgr *browser.Manager) {
 	} else if mgr != nil {
 		_ = mgr.Close()
 	}
+}
+
+// runHealthcheck performs a local HTTP /health probe for distroless container
+// HEALTHCHECK probes where curl/wget/sh do not exist.
+func runHealthcheck() int {
+	port := strings.TrimSpace(os.Getenv("API_PORT"))
+	if port == "" {
+		port = "8000"
+	}
+	return probeLocalHealth(fmt.Sprintf("http://127.0.0.1:%s/health", port), 2*time.Second)
+}
+
+func probeLocalHealth(url string, timeout time.Duration) int {
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return 1
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		return 0
+	}
+	return 1
 }
 
 func sortedNames(provs map[string]providers.Provider) []string {

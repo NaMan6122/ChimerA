@@ -7,7 +7,7 @@
 #
 # Produces in dist/:
 #   chimera_<ver>_<os>_<arch>.tar.gz     all three binaries + LICENSE + README
-#   chimera_<ver>_windows_amd64.zip
+#   chimera_<ver>_windows_<arch>.zip     amd64 + arm64
 #   checksums.txt                        sha256 over every artifact
 #   chimera.rb                           Homebrew formula for the tap
 #
@@ -58,28 +58,30 @@ build_unix() {
             go build -C "$ROOT" -trimpath -ldflags "$LDFLAGS" -o "$stage/$1" "$2"
     done
     cp "$ROOT/LICENSE" "$ROOT/README.md" "$stage/"
-    ( cd "$stage" && COPYFILE_DISABLE=1 tar -czf "$DIST/$name.tar.gz" chimera chimera-spin chimera-chat LICENSE README.md )
+    ( cd "$stage" && COPYFILE_DISABLE=1 GZIP=-n tar -czf "$DIST/$name.tar.gz" chimera chimera-spin chimera-chat LICENSE README.md )
     rm -rf "$stage"
     printf '    %s.tar.gz (%s)\n' "$name" "$(du -h "$DIST/$name.tar.gz" | cut -f1)"
 }
 
 build_windows() {
-    local name="chimera_${VERNUM}_windows_amd64"
+    local goarch=$1
+    local name="chimera_${VERNUM}_windows_${goarch}"
     local stage="$DIST/$name"
     mkdir -p "$stage"
     for pkg in "${BINARIES[@]}"; do
         set -- $pkg
-        CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+        CGO_ENABLED=0 GOOS=windows GOARCH=$goarch \
             go build -C "$ROOT" -trimpath -ldflags "$LDFLAGS" -o "$stage/$1.exe" "$2"
     done
     cp "$ROOT/LICENSE" "$ROOT/README.md" "$stage/"
-    ( cd "$stage" && zip -q -r "$DIST/$name.zip" . )
+    ( cd "$stage" && zip -X -q -r "$DIST/$name.zip" . )
     rm -rf "$stage"
     printf '    %s.zip (%s)\n' "$name" "$(du -h "$DIST/$name.zip" | cut -f1)"
 }
 
 for p in "${PLATFORMS[@]}"; do build_unix $p; done
-build_windows
+build_windows amd64
+build_windows arm64
 
 ( cd "$DIST" && for f in chimera_*.tar.gz chimera_*.zip; do echo "$(sum "$f")  $f"; done > checksums.txt )
 printf '    checksums.txt (%d artifacts)\n' "$(wc -l < "$DIST/checksums.txt" | tr -d ' ')"
@@ -120,7 +122,7 @@ class Chimera < Formula
     if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
       url "https://github.com/$REPO/releases/download/$VERSION/chimera_${VERNUM}_linux_amd64.tar.gz"
       sha256 "$(sha_for "chimera_${VERNUM}_linux_amd64.tar.gz")"
-    else
+    elsif Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
       url "https://github.com/$REPO/releases/download/$VERSION/chimera_${VERNUM}_linux_arm64.tar.gz"
       sha256 "$(sha_for "chimera_${VERNUM}_linux_arm64.tar.gz")"
     end

@@ -58,6 +58,7 @@ OPTIONS
   CHIMERA_VERSION=v0.4.0  pin a release (default: latest)
   CHIMERA_PREFIX=/opt/x   relocate the install (default: ~/.local)
   CHIMERA_FROM_DIR=dist/  install from local artifacts instead of the network
+  --quiet                 suppress the post-install guide (for CI and scripts)
   --help                  this guide
   --agent                 print only the copy-paste prompt for a coding agent
 
@@ -77,7 +78,7 @@ AFTER INSTALLING — SET UP A TRANSPORT (manually)
   1. Export a session once (opens a real browser; complete the login there):
 
          cd ~/chimera
-         chimera auth login chatgpt        # or: deepseek, qwen
+         chimera auth login chatgpt        # or: deepseek, qwen, kimi, glm, gemini, grok
          chimera auth status               # validity + expiry, never secrets
 
      The session lands in auth_data/<provider>.json (mode 0600). It expires
@@ -178,104 +179,123 @@ GitHub release binaries.
 AGENT
 }
 
-# --- flags (work under `bash install.sh` and `curl | bash -s -- <flag>`) ----
-for arg in "$@"; do
-    case "$arg" in
-        -h|--help|help) guide_usage; exit 0 ;;
-        --agent)        agent_guide; exit 0 ;;
-        *) fail "unknown argument: $arg (try --help)" ;;
-    esac
-done
-
-case "$(uname -s)" in
-    Darwin) goos=darwin ;;
-    Linux)  goos=linux ;;
-    *)      fail "unsupported OS: $(uname -s) — use the windows_amd64.zip release asset" ;;
-esac
-case "$(uname -m)" in
-    arm64|aarch64) goarch=arm64 ;;
-    x86_64|amd64)  goarch=amd64 ;;
-    *)             fail "unsupported architecture: $(uname -m)" ;;
-esac
-
 sha_of() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
     else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
-# --- resolve which release to install ---------------------------------------
-if [ -n "${CHIMERA_VERSION:-}" ]; then
-    VERSION=$CHIMERA_VERSION
-    say "installing pinned release $VERSION"
-elif [ -n "$FROM_DIR" ]; then
-    VERSION=$(ls "$FROM_DIR" 2>/dev/null | sed -n "s/^chimera_\\(.*\\)_${goos}_${goarch}\\.tar\\.gz\$/\\1/p" | head -n1)
-    [ -n "$VERSION" ] || fail "no ${goos}/${goarch} artifact in $FROM_DIR — run scripts/dist.sh first"
-    say "installing local build $VERSION from $FROM_DIR"
-else
-    say "resolving latest release"
-    VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-        | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
-    [ -n "$VERSION" ] || fail "could not resolve the latest release (rate limit? set CHIMERA_VERSION=v0.4.0)"
-    say "installing latest release $VERSION"
-fi
+resolve_latest_tag() {
+    # Prefer the HTML redirect on releases/latest to avoid GitHub's 60 req/hr
+    # unauthenticated REST API quota behind shared NATs and CI runners.
+    local final_url tag=""
+    final_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null || true)
+    case "$final_url" in
+        */releases/tag/*) tag="${final_url##*/releases/tag/}" ;;
+    esac
+    if [ -z "$tag" ]; then
+        tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+            | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+    fi
+    printf '%s' "$tag"
+}
 
-# Version-dir name matches what build.sh (git describe) produces for the same
-# tag, so the two install paths upgrade over each other instead of leaving
-# two trees. Artifact filenames strip the leading "v"; restore it for
-# semver-looking local builds.
-if [ -n "$FROM_DIR" ] && [ "${VERSION#v}" = "$VERSION" ] && echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
-    VERSION="v$VERSION"
-fi
+main() {
+    local quiet=0 goos goarch VERSION VERNUM ART TMP WANT GOT DEST
+    for arg in "$@"; do
+        case "$arg" in
+            -h|--help|help) guide_usage; exit 0 ;;
+            --agent)        agent_guide; exit 0 ;;
+            -q|--quiet)     quiet=1 ;;
+            *) fail "unknown argument: $arg (try --help)" ;;
+        esac
+    done
 
-VERNUM=${VERSION#v}
-ART="chimera_${VERNUM}_${goos}_${goarch}.tar.gz"
+    case "$(uname -s)" in
+        Darwin) goos=darwin ;;
+        Linux)  goos=linux ;;
+        *)      fail "unsupported OS: $(uname -s) — use the windows_*.zip release asset" ;;
+    esac
+    case "$(uname -m)" in
+        arm64|aarch64) goarch=arm64 ;;
+        x86_64|amd64)  goarch=amd64 ;;
+        *)             fail "unsupported architecture: $(uname -m)" ;;
+    esac
 
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+    # --- resolve which release to install -----------------------------------
+    if [ -n "${CHIMERA_VERSION:-}" ]; then
+        VERSION=$CHIMERA_VERSION
+        say "installing pinned release $VERSION"
+    elif [ -n "$FROM_DIR" ]; then
+        VERSION=$(ls "$FROM_DIR" 2>/dev/null | sed -n "s/^chimera_\\(.*\\)_${goos}_${goarch}\\.tar\\.gz\$/\\1/p" | head -n1)
+        [ -n "$VERSION" ] || fail "no ${goos}/${goarch} artifact in $FROM_DIR — run scripts/dist.sh first"
+        say "installing local build $VERSION from $FROM_DIR"
+    else
+        say "resolving latest release"
+        VERSION=$(resolve_latest_tag)
+        [ -n "$VERSION" ] || fail "could not resolve the latest release (set CHIMERA_VERSION=v0.4.0)"
+        say "installing latest release $VERSION"
+    fi
 
-# --- fetch -------------------------------------------------------------------
-if [ -n "$FROM_DIR" ]; then
-    cp "$FROM_DIR/$ART" "$FROM_DIR/checksums.txt" "$TMP/"
-else
-    say "downloading $ART"
-    curl -fsSL --retry 3 "https://github.com/$REPO/releases/download/$VERSION/$ART" -o "$TMP/$ART" \
-        || fail "download failed — does release $VERSION exist? (CHIMERA_VERSION pins one)"
-    curl -fsSL --retry 3 "https://github.com/$REPO/releases/download/$VERSION/checksums.txt" -o "$TMP/checksums.txt" \
-        || fail "checksums.txt missing from release $VERSION"
-fi
+    # Version-dir name matches what build.sh (git describe) produces for the same
+    # tag, so the two install paths upgrade over each other instead of leaving
+    # two trees. Artifact filenames strip the leading "v"; restore it for
+    # semver-looking local builds.
+    if [ -n "$FROM_DIR" ] && [ "${VERSION#v}" = "$VERSION" ] && echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+        VERSION="v$VERSION"
+    fi
 
-# --- verify ------------------------------------------------------------------
-WANT=$(awk -v f="$ART" '$2==f {print $1}' "$TMP/checksums.txt")
-[ -n "$WANT" ] || fail "$ART is not listed in checksums.txt — refusing to install"
-GOT=$(sha_of "$TMP/$ART")
-if [ "$GOT" != "$WANT" ]; then
-    fail "checksum mismatch for $ART\n  want $WANT\n  got  $GOT"
-fi
-say "checksum verified"
+    VERNUM=${VERSION#v}
+    ART="chimera_${VERNUM}_${goos}_${goarch}.tar.gz"
 
-# --- install -----------------------------------------------------------------
-DEST="$PREFIX/share/chimera/versions/$VERSION"
-mkdir -p "$DEST" "$PREFIX/bin"
-tar -xzf "$TMP/$ART" -C "$DEST"
-for name in chimera chimera-spin chimera-chat; do
-    chmod 0755 "$DEST/$name"
-    ln -sfn "$DEST/$name" "$PREFIX/bin/$name"
-    printf '    %s -> %s\n' "$PREFIX/bin/$name" "$DEST/$name"
-done
-# One-word backend launchers: `chimera-kimi` == `chimera up kimi`.
-for prov in chatgpt gpt qwen deepseek kimi gemini grok glm; do
-    ln -sfn "$DEST/chimera" "$PREFIX/bin/chimera-$prov"
-done
-printf '    %s/chimera-{chatgpt,gpt,qwen,deepseek,kimi,gemini,grok,glm} -> chimera\n' "$PREFIX/bin"
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
 
-case ":$PATH:" in
-    *":$PREFIX/bin:"*) ;;
-    *) printf '\n%s\n%s\n' "==> note: $PREFIX/bin is not on PATH" \
-       "    export PATH=\"$PREFIX/bin:\$PATH\"   # add to your shell rc" ;;
-esac
+    # --- fetch --------------------------------------------------------------
+    if [ -n "$FROM_DIR" ]; then
+        cp "$FROM_DIR/$ART" "$FROM_DIR/checksums.txt" "$TMP/"
+    else
+        say "downloading $ART"
+        curl -fsSL --retry 3 "https://github.com/$REPO/releases/download/$VERSION/$ART" -o "$TMP/$ART" \
+            || fail "download failed — does release $VERSION exist? (CHIMERA_VERSION pins one)"
+        curl -fsSL --retry 3 "https://github.com/$REPO/releases/download/$VERSION/checksums.txt" -o "$TMP/checksums.txt" \
+            || fail "checksums.txt missing from release $VERSION"
+    fi
 
-say "installed chimera $VERSION ($("$PREFIX/bin/chimera" -version))"
-# The full guide prints on every install: curl|bash users never see a man
-# page, so the instructions travel with the action. --help prints the same
-# text on demand (or before deciding to install).
-guide_usage
+    # --- verify -------------------------------------------------------------
+    WANT=$(awk -v f="$ART" '$2==f {print $1}' "$TMP/checksums.txt")
+    [ -n "$WANT" ] || fail "$ART is not listed in checksums.txt — refusing to install"
+    GOT=$(sha_of "$TMP/$ART")
+    if [ "$GOT" != "$WANT" ]; then
+        fail "checksum mismatch for $ART\n  want $WANT\n  got  $GOT"
+    fi
+    say "checksum verified"
+
+    # --- install ------------------------------------------------------------
+    DEST="$PREFIX/share/chimera/versions/$VERSION"
+    mkdir -p "$DEST" "$PREFIX/bin"
+    tar -xzf "$TMP/$ART" -C "$DEST"
+    for name in chimera chimera-spin chimera-chat; do
+        chmod 0755 "$DEST/$name"
+        ln -sfn "$DEST/$name" "$PREFIX/bin/$name"
+        printf '    %s -> %s\n' "$PREFIX/bin/$name" "$DEST/$name"
+    done
+    # One-word backend launchers: `chimera-kimi` == `chimera up kimi`.
+    for prov in chatgpt gpt qwen deepseek kimi gemini grok glm; do
+        ln -sfn "$DEST/chimera" "$PREFIX/bin/chimera-$prov"
+    done
+    printf '    %s/chimera-{chatgpt,gpt,qwen,deepseek,kimi,gemini,grok,glm} -> chimera\n' "$PREFIX/bin"
+
+    case ":$PATH:" in
+        *":$PREFIX/bin:"*) ;;
+        *) printf '\n%s\n%s\n' "==> note: $PREFIX/bin is not on PATH" \
+           "    export PATH=\"$PREFIX/bin:\$PATH\"   # add to your shell rc" ;;
+    esac
+
+    say "installed chimera $VERSION ($("$PREFIX/bin/chimera" -version))"
+    if [ "$quiet" -eq 0 ]; then
+        guide_usage
+    fi
+}
+
+# Execute only once the entire script has arrived over the pipe.
+main "$@"

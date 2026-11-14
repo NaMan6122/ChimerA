@@ -1,20 +1,44 @@
 services:
   chimera:
-    build: .
+    build:
+      context: .
+      target: browser
     container_name: chimera
     ports:
       - "8000:8000"   # OpenAI-compatible API
       - "6080:6080"   # noVNC (browser UI for login)
       - "5900:5900"   # VNC
     volumes:
+      - ./auth_data:/app/auth_data
       - ./browser_data:/app/browser_data
       - ./logs:/app/logs
       - ./.env:/app/.env
     environment:
       - PROVIDER=${PROVIDER:-chatgpt}
+      - TRANSPORT=${TRANSPORT:-auto}
       - API_TOKEN=${API_TOKEN:-chimera}
       - API_PORT=8000
       - HEADLESS=false
       - VNC_PASSWORD=${VNC_PASSWORD:-}
     restart: unless-stopped
     shm_size: 2gb
+
+  # Browserless ~22MB distroless container (no Chromium/VNC):
+  #   docker compose --profile slim up --build -d chimera-slim
+  chimera-slim:
+    build:
+      context: .
+      target: slim
+    container_name: chimera-slim
+    profiles: ["slim"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./auth_data:/app/auth_data
+      - ./logs:/app/logs
+    environment:
+      - PROVIDER=${PROVIDER:-all}
+      - TRANSPORT=webapi
+      - API_TOKEN=${API_TOKEN:-chimera}
+      - API_PORT=8000
+    restart: unless-stopped
