@@ -252,6 +252,8 @@ func main() {
 		}
 	}
 
+	server.SetVersion(version)
+
 	httpServer := &http.Server{
 		Addr:         addr,
 		Handler:      server.Router(),

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chimera/chimera/internal/config"
 	"github.com/chimera/chimera/internal/models"
@@ -673,4 +674,86 @@ func TestMetricsPathLabelBounded(t *testing.T) {
 	if !strings.Contains(text, `path="other"`) {
 		t.Fatalf("expected bounded path=\"other\" series, got: %s", text)
 	}
+}
+
+func TestRootVersionStamp(t *testing.T) {
+	cfg := testConfig()
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	var info map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info["version"] != "dev" {
+		t.Fatalf("default root version = %q, want dev", info["version"])
+	}
+
+	srv.SetVersion("v0.4.1")
+	w2 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w2, httptest.NewRequest("GET", "/", nil))
+	var info2 map[string]string
+	if err := json.Unmarshal(w2.Body.Bytes(), &info2); err != nil {
+		t.Fatal(err)
+	}
+	if info2["version"] != "v0.4.1" {
+		t.Fatalf("stamped root version = %q, want v0.4.1", info2["version"])
+	}
+}
+
+func TestChatCompletionsStreamPreservesMultiByteUTF8Runes(t *testing.T) {
+	cfg := testConfig()
+	cfg.RateLimitSeconds = 0
+	p := &mockProvider{name: "chatgpt", modelID: "chimera-chatgpt"}
+	srv := NewServer(cfg, p)
+
+	// Engineer multi-byte 3-byte ("─", "中") and 4-byte ("🦀") runes across 20-byte boundaries.
+	prompt := strings.Repeat("a", 19) + "🦀" + strings.Repeat("b", 18) + "─中文测试🦀"
+	want := "mock reply to: " + prompt
+
+	payload, _ := json.Marshal(models.ChatCompletionRequest{
+		Model:    "chimera-chatgpt",
+		Stream:   true,
+		Messages: []models.ChatMessage{{Role: "user", Content: json.RawMessage(mustJSON(prompt))}},
+	})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer testtoken")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var assembled strings.Builder
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+			continue
+		}
+		var chunk models.ChatCompletionChunk
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk); err != nil {
+			t.Fatalf("unmarshal chunk %q: %v", line, err)
+		}
+		for _, ch := range chunk.Choices {
+			if !utf8.ValidString(ch.Delta.Content) {
+				t.Fatalf("invalid UTF-8 in SSE chunk: %q", ch.Delta.Content)
+			}
+			if strings.ContainsRune(ch.Delta.Content, '\uFFFD') {
+				t.Fatalf("replacement char U+FFFD in SSE chunk %q (split multi-byte rune)", ch.Delta.Content)
+			}
+			assembled.WriteString(ch.Delta.Content)
+		}
+	}
+	if assembled.String() != want {
+		t.Fatalf("assembled SSE = %q, want %q", assembled.String(), want)
+	}
+}
+
+func mustJSON(s string) []byte {
+	b, _ := json.Marshal(s)
+	return b
 }
