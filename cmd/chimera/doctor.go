@@ -497,9 +497,12 @@ var knownEnvKeys = map[string]bool{
 	"CHATGPT_WEB_MODEL": true,
 	"GEMINI_WEB_MODEL":  true, "GEMINI_WEB_THINKING": true,
 	"GROK_WEB_MODEL": true,
+	"GLM_WEB_MODEL":  true,
+	"KIMI_WEB_MODEL": true, "KIMI_WEB_URL": true,
 	// provider URLs
 	"CHATGPT_URL": true, "CLAUDE_URL": true, "QWEN_URL": true,
 	"DEEPSEEK_URL": true, "KIMI_URL": true, "GEMINI_URL": true, "GROK_URL": true,
+	"GLM_URL": true,
 	// timeouts + human simulation
 	"RESPONSE_TIMEOUT": true, "SELECTOR_TIMEOUT": true,
 	"TYPING_SPEED_MIN": true, "TYPING_SPEED_MAX": true,
@@ -514,9 +517,16 @@ var knownEnvKeys = map[string]bool{
 	"METER_DB": true, "QUOTA_MONTHLY_REQUESTS": true,
 	// misc
 	"VNC_PASSWORD":         true,
+	"SESSIONS_DIR":         true,
 	"CHIMERA_SESSIONS_DIR": true,
 	"CHROME_BIN":           true,
+	"CHATGPT_DUMP":         true,
+	"DEEPSEEK_SSE_DUMP":    true,
+	"QWEN_DUMP":            true,
+	"GEMINI_DUMP":          true,
 	"GROK_DUMP":            true,
+	"GLM_DUMP":             true,
+	"KIMI_DUMP":            true,
 }
 
 // checkEnvFile reads .env and sanity-checks key names. A typo'd key is

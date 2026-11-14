@@ -312,6 +312,8 @@ func (c *Config) ProviderURL() string {
 		return c.GeminiURL
 	case ProviderGrok:
 		return c.GrokURL
+	case ProviderGLM:
+		return c.GLMURL
 	default:
 		return c.ChatGPTURL
 	}

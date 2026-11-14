@@ -169,10 +169,14 @@ func TestProviderEndToEnd(t *testing.T) {
 	}
 
 	// Self-heal: a dead chat pointer retries once on a fresh chat.
-	p.mu.Lock()
-	p.convs["thread-2"] = convRef{chatID: "poison", parentID: "stale"}
-	p.mu.Unlock()
+	p.convs.Set("thread-2", convRef{chatID: "poison", parentID: "stale"})
 	if _, err := p.SendMessage("again", "thread-2"); err != nil {
 		t.Fatalf("self-heal turn: %v", err)
+	}
+	if err := p.NewChat(); err != nil {
+		t.Fatalf("NewChat: %v", err)
+	}
+	if p.convs.Len() != 0 {
+		t.Fatalf("NewChat did not clear kimi conversations: len=%d", p.convs.Len())
 	}
 }

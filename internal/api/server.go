@@ -36,6 +36,7 @@ var log_ = logging.New("api", "./logs", "debug", true)
 // Supports both single-provider and pooled (single Chromium, page-per-provider) modes.
 type Server struct {
 	cfg        *config.Config
+	version    string
 	router     *chi.Mux
 	provider   providers.Provider            // single-provider mode (legacy)
 	providers  map[string]providers.Provider // pooled mode: provider name -> Provider
@@ -115,6 +116,7 @@ func openTranscripts(cfg *config.Config) *spin.Store {
 func NewServer(cfg *config.Config, provider providers.Provider) *Server {
 	s := &Server{
 		cfg:         cfg,
+		version:     "dev",
 		provider:    provider,
 		providers:   map[string]providers.Provider{provider.Name(): provider},
 		mus:         map[string]*sync.Mutex{provider.Name(): &sync.Mutex{}},
@@ -136,6 +138,7 @@ func NewServer(cfg *config.Config, provider providers.Provider) *Server {
 func NewPooledServer(cfg *config.Config, poolProviders map[string]providers.Provider, poolMus map[string]*sync.Mutex, browser *rod.Browser) *Server {
 	s := &Server{
 		cfg:         cfg,
+		version:     "dev",
 		providers:   poolProviders,
 		mus:         poolMus,
 		browser:     browser,
@@ -160,6 +163,13 @@ func NewPooledServer(cfg *config.Config, poolProviders map[string]providers.Prov
 	s.setupRoutes()
 
 	return s
+}
+
+// SetVersion sets the build version reported by GET / (defaults to "dev").
+func (s *Server) SetVersion(v string) {
+	if v = strings.TrimSpace(v); v != "" {
+		s.version = v
+	}
 }
 
 // newRateLimiter builds the global token bucket. RateLimitSeconds<=0 disables limiting.
@@ -253,9 +263,13 @@ func (s *Server) setupRoutes() {
 		if s.isPooled() {
 			providerInfo = "pool:" + strings.Join(s.providerNames(), ",")
 		}
+		ver := s.version
+		if ver == "" {
+			ver = "dev"
+		}
 		json.NewEncoder(w).Encode(map[string]string{
 			"name":     "Chimera Gateway",
-			"version":  "0.1.0",
+			"version":  ver,
 			"status":   "running",
 			"provider": providerInfo,
 		})
@@ -1170,23 +1184,22 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 		return
 	}
 
-	chunkSize := 20
-	for i := 0; i < len(text); i += chunkSize {
+	const chunkRunes = 20
+	for rem := text; len(rem) > 0; {
 		select {
 		case <-r.Context().Done():
 			return
 		default:
 		}
-		end := i + chunkSize
-		if end > len(text) {
-			end = len(text)
-		}
+		n := scanRuneChunk(rem, chunkRunes)
+		part := rem[:n]
+		rem = rem[n:]
 		chunk := models.ChatCompletionChunk{
 			ID:      respID,
 			Object:  "chat.completion.chunk",
 			Created: created,
 			Model:   provider.ModelID(),
-			Choices: []models.ChunkChoice{{Index: 0, Delta: models.DeltaMsg{Content: text[i:end]}}},
+			Choices: []models.ChunkChoice{{Index: 0, Delta: models.DeltaMsg{Content: part}}},
 		}
 		sendSSE(w, chunk)
 		flusher.Flush()
@@ -1204,6 +1217,23 @@ func (s *Server) handleStreamingCompletionWithProvider(w http.ResponseWriter, r 
 	flusher.Flush()
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+// scanRuneChunk returns the byte length of at most maxRunes complete UTF-8
+// runes from the start of s so emulated SSE chunks never split multi-byte
+// codepoints into invalid UTF-8 sequences.
+func scanRuneChunk(s string, maxRunes int) int {
+	if maxRunes <= 0 || s == "" {
+		return len(s)
+	}
+	count := 0
+	for idx := range s {
+		if count == maxRunes {
+			return idx
+		}
+		count++
+	}
+	return len(s)
 }
 
 // sendSSE writes a single SSE event.

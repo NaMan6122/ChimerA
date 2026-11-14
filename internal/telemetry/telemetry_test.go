@@ -52,6 +52,11 @@ func TestObserveChatRequestBoundsModel(t *testing.T) {
 	if got := testutil.ToFloat64(Default.ChatRequests.WithLabelValues("chatgpt", "chimera-chatgpt", "200")); got != 1 {
 		t.Fatalf("known model counter = %v, want 1", got)
 	}
+	for _, known := range []string{"chimera-gemini", "chimera-grok", "chimera-glm", "gemini", "grok", "glm"} {
+		if got := metricModel(known); got != known {
+			t.Fatalf("metricModel(%q) = %q, want %q", known, got, known)
+		}
+	}
 }
 
 func TestHandlerExposesMetrics(t *testing.T) {

@@ -30,7 +30,7 @@ Commands:
   import   Validate and install an exported session file
   status   Show the stored session's validity and expiry
 
-Providers: qwen, deepseek, chatgpt, gemini, grok.
+Providers: chatgpt, deepseek, qwen, kimi, glm, gemini, grok.
   Select one with PROVIDER=<name> or pass it as the first argument:
       chimera auth login chatgpt
       chimera auth login --provider deepseek
@@ -70,8 +70,14 @@ type authSpec struct {
 	// CookieHost filters collected cookies to the provider's own domains.
 	CookieHost string
 	// Marker is stored as the session's AccessToken for cookie-custody providers
-	// whose bearer is minted on demand.
+	// whose bearer is minted on demand. When empty on a CookieName spec, the
+	// matched cookie's raw Value is stored as AccessToken instead (e.g. GLM's
+	// chatglm_refresh_token).
 	Marker string
+	// LoginURL optionally overrides cfg.ProviderURL() for the login browser
+	// (e.g. Kimi's web API credential lives on KimiWebURL https://www.kimi.ai,
+	// whereas KimiURL stays https://www.kimi.com for the DOM transport).
+	LoginURL func(*config.Config) string
 }
 
 var authSpecs = map[string]authSpec{
@@ -120,6 +126,75 @@ var authSpecs = map[string]authSpec{
 		CookieHost: "grok",
 		Marker:     "cookie-session",
 	},
+	config.ProviderGLM: {
+		// Zhipu chatglm.cn: chatglm_refresh_token is a cookie credential whose
+		// raw value exchanges for 24h access JWTs. Marker is left empty so
+		// Session.AccessToken stores the cookie value itself.
+		CookieName: "chatglm_refresh_token",
+		CookieHost: "chatglm.cn",
+	},
+	config.ProviderKimi: {
+		// Kimi web API (www.kimi.ai): tokens live in web storage under
+		// KimiWebURL (matching the JWT aud). Prefer refresh_token so rotated
+		// tokens persist across refreshes, falling back to access_token.
+		TokenExpr:  `() => localStorage.getItem('refresh_token') || localStorage.getItem('access_token') || ''`,
+		CookieHost: "kimi",
+		LoginURL:   func(c *config.Config) string { return c.KimiWebURL },
+	},
+}
+
+// canonicalAuthOrder defines the deterministic display/batch order for
+// browserless auth commands; any future key added to authSpecs is appended
+// alphabetically so authProviderNames() can never silently omit a spec.
+var canonicalAuthOrder = []string{
+	config.ProviderChatGPT,
+	config.ProviderDeepSeek,
+	config.ProviderQwen,
+	config.ProviderKimi,
+	config.ProviderGLM,
+	config.ProviderGemini,
+	config.ProviderGrok,
+}
+
+func authProviderNames() []string {
+	seen := make(map[string]bool, len(authSpecs))
+	out := make([]string, 0, len(authSpecs))
+	for _, p := range canonicalAuthOrder {
+		if _, ok := authSpecs[p]; ok {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for p := range authSpecs {
+		if !seen[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// loginConfigFor returns a shallow copy of cfg tuned for interactive login and
+// the target origin URL. Overrides LoginURL (e.g. KimiWebURL) on the copy so
+// browser.Manager.Launch() navigates to the right domain without mutating cfg.
+func loginConfigFor(cfg *config.Config, spec authSpec) (*config.Config, string) {
+	c := *cfg
+	u := c.ProviderURL()
+	if spec.LoginURL != nil {
+		if over := strings.TrimSpace(spec.LoginURL(&c)); over != "" {
+			u = over
+			if c.Provider == config.ProviderKimi {
+				c.KimiURL = over
+			}
+		}
+	}
+	return &c, u
+}
+
+func markerForCookie(spec authSpec, val string) string {
+	if spec.Marker != "" {
+		return spec.Marker
+	}
+	return val
 }
 
 // runAuth handles `chimera auth <command>` and exits.
@@ -234,10 +309,11 @@ func authLogin(cfg *config.Config, args []string) {
 		os.Exit(1)
 	}
 
-	printLoginInstructions(cfg.Provider, cfg.ProviderURL(), *timeout)
+	loginCfg, loginURL := loginConfigFor(cfg, spec)
+	printLoginInstructions(cfg.Provider, loginURL, *timeout)
 
-	mgr := browser.NewManager(cfg)
-	page, err := mgr.Launch() // navigates to cfg.ProviderURL()
+	mgr := browser.NewManager(loginCfg)
+	page, err := mgr.Launch() // navigates to loginURL
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "launch browser:", err)
 		os.Exit(1)
@@ -251,14 +327,14 @@ func authLogin(cfg *config.Config, args []string) {
 	for time.Now().Before(deadline) {
 		time.Sleep(3 * time.Second)
 
-		cookies, err := page.Cookies([]string{cfg.ProviderURL()})
+		cookies, err := page.Cookies([]string{loginURL})
 		if err != nil {
 			continue
 		}
 		if spec.CookieName != "" {
 			for _, c := range cookies {
 				if cookieMatches(spec, c.Name) && c.Value != "" {
-					marker = spec.Marker
+					marker = markerForCookie(spec, c.Value)
 					break
 				}
 			}
@@ -283,7 +359,7 @@ func authLogin(cfg *config.Config, args []string) {
 		os.Exit(1)
 	}
 
-	cookies, err := page.Cookies([]string{cfg.ProviderURL()})
+	cookies, err := page.Cookies([]string{loginURL})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "read cookies:", err)
 		os.Exit(1)
@@ -364,6 +440,10 @@ func printLoginInstructions(provider, url string, timeout time.Duration) {
 		fmt.Println("  loading the chat UI for it to be written.")
 	case config.ProviderQwen:
 		fmt.Println("  Qwen stores its token in localStorage once the chat UI loads.")
+	case config.ProviderKimi:
+		fmt.Println("  Kimi stores its refresh/access token in localStorage on www.kimi.ai.")
+	case config.ProviderGLM:
+		fmt.Println("  GLM stores chatglm_refresh_token as a cookie once chatglm.cn signs in.")
 	}
 	fmt.Printf("\nWaiting for the session (up to %s)...\n", timeout)
 }
@@ -521,7 +601,7 @@ func authLoginAll(cfg *config.Config, args []string) {
 	timeout := fs.Duration("timeout", 5*time.Minute, "per-provider wait for login")
 	_ = fs.Parse(args)
 
-	providers := []string{config.ProviderChatGPT, config.ProviderDeepSeek, config.ProviderQwen}
+	providers := authProviderNames()
 	fmt.Printf("Logging in to %d providers in sequence. Each opens its own window.\n", len(providers))
 	fmt.Println("Finish the login in each window before the next opens.")
 
@@ -566,7 +646,8 @@ func loginOne(cfg *config.Config, timeout time.Duration) error {
 	if !ok {
 		return fmt.Errorf("no login spec for provider %q", cfg.Provider)
 	}
-	mgr := browser.NewManager(cfg)
+	loginCfg, loginURL := loginConfigFor(cfg, spec)
+	mgr := browser.NewManager(loginCfg)
 	page, err := mgr.Launch()
 	if err != nil {
 		return fmt.Errorf("launch browser: %w", err)
@@ -577,14 +658,14 @@ func loginOne(cfg *config.Config, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(3 * time.Second)
-		cookies, err := page.Cookies([]string{cfg.ProviderURL()})
+		cookies, err := page.Cookies([]string{loginURL})
 		if err != nil {
 			continue
 		}
 		if spec.CookieName != "" {
 			for _, c := range cookies {
 				if cookieMatches(spec, c.Name) && c.Value != "" {
-					marker = spec.Marker
+					marker = markerForCookie(spec, c.Value)
 					break
 				}
 			}
@@ -603,7 +684,7 @@ func loginOne(cfg *config.Config, timeout time.Duration) error {
 		return fmt.Errorf("timed out after %s waiting for login", timeout)
 	}
 
-	cookies, err := page.Cookies([]string{cfg.ProviderURL()})
+	cookies, err := page.Cookies([]string{loginURL})
 	if err != nil {
 		return fmt.Errorf("read cookies: %w", err)
 	}
@@ -659,7 +740,7 @@ func cookieMatches(spec authSpec, name string) bool {
 // same credential probe the assessment script uses: the STORED BEARER (or cookie
 // jar) is what decides liveness, not a 200 from an unauthenticated endpoint.
 func authCheckAll(cfg *config.Config) {
-	providers := []string{config.ProviderChatGPT, config.ProviderDeepSeek, config.ProviderQwen}
+	providers := authProviderNames()
 	fmt.Printf("Checking %d stored sessions (no browser).\n\n", len(providers))
 	bad := 0
 	for _, p := range providers {
@@ -792,13 +873,7 @@ func warnStaleProfile(cfg *config.Config) {
 }
 
 func supportedAuthProviders() string {
-	out := make([]string, 0, len(authSpecs))
-	for _, p := range []string{config.ProviderQwen, config.ProviderDeepSeek, config.ProviderChatGPT} {
-		if _, ok := authSpecs[p]; ok {
-			out = append(out, p)
-		}
-	}
-	return strings.Join(out, ", ")
+	return strings.Join(authProviderNames(), ", ")
 }
 
 func expirySuffix(st webapi.SessionStatus) string {

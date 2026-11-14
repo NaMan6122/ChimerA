@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/chimera/chimera/internal/config"
@@ -32,8 +31,7 @@ type Provider struct {
 	sess   *webapi.Session
 	log    *logging.Logger
 
-	mu    sync.Mutex
-	convs map[string]convState
+	convs webapi.ConvStore[convState]
 }
 
 type convState struct {
@@ -44,9 +42,8 @@ type convState struct {
 // New returns an uninitialized web transport; call Init before serving.
 func New(cfg *config.Config) *Provider {
 	return &Provider{
-		cfg:   cfg,
-		convs: map[string]convState{},
-		log:   logging.New("deepseek-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
+		cfg: cfg,
+		log: logging.New("deepseek-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
 	}
 }
 
@@ -111,9 +108,7 @@ func staleConversation(err error) bool {
 func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderResponse, error) {
 	start := time.Now()
 
-	p.mu.Lock()
-	conv, ok := p.convs[threadID]
-	p.mu.Unlock()
+	conv, ok := p.convs.Get(threadID)
 
 	if !ok {
 		sessionID, err := p.client.CreateChatSession()
@@ -159,13 +154,11 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 		return nil, fmt.Errorf("deepseek returned an empty response (thinking=%t; set DEEPSEEK_SSE_DUMP to capture the wire)", p.cfg.DeepSeekWebThinking)
 	}
 
-	p.mu.Lock()
 	parent := res.ResponseID
 	if parent == "" {
 		parent = conv.parentID
 	}
-	p.convs[threadID] = convState{sessionID: conv.sessionID, parentID: parent}
-	p.mu.Unlock()
+	p.convs.Set(threadID, convState{sessionID: conv.sessionID, parentID: parent})
 
 	in := usageInt(res.Usage, "prompt_tokens")
 	if in == 0 {
@@ -207,9 +200,7 @@ func shortID(id string) string {
 
 // NewChat forgets every conversation so the next turn starts fresh.
 func (p *Provider) NewChat() error {
-	p.mu.Lock()
-	p.convs = map[string]convState{}
-	p.mu.Unlock()
+	p.convs.Clear()
 	return nil
 }
 

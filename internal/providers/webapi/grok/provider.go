@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,8 +39,7 @@ type Provider struct {
 	sess   *webapi.Session
 	log    *logging.Logger
 
-	mu    sync.Mutex
-	convs map[string]convState
+	convs webapi.ConvStore[convState]
 
 	// quota caches the last known rate-limits reading for the health
 	// endpoint (providers.QuotaReporter). Refreshed at Init and after
@@ -111,9 +109,8 @@ func foldPrompt(history []turn, text string) string {
 // New returns an uninitialized web transport; call Init before serving.
 func New(cfg *config.Config) *Provider {
 	return &Provider{
-		cfg:   cfg,
-		convs: map[string]convState{},
-		log:   logging.New("grok-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
+		cfg: cfg,
+		log: logging.New("grok-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
 	}
 }
 
@@ -189,9 +186,7 @@ func (p *Provider) Quota() map[string]any {
 func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderResponse, error) {
 	start := time.Now()
 
-	p.mu.Lock()
-	st, ok := p.convs[threadID]
-	p.mu.Unlock()
+	st, ok := p.convs.Get(threadID)
 
 	wire := foldPrompt(st.history, text)
 	meta := TurnMeta{ConversationID: st.conversationID, ResponseID: st.responseID}
@@ -210,13 +205,11 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 		st.history = append(st.history, turn{role: "user", text: text}, turn{role: "assistant", text: res.Content})
 	}
 
-	p.mu.Lock()
-	p.convs[threadID] = convState{
+	p.convs.Set(threadID, convState{
 		conversationID: res.ConversationID,
 		responseID:     res.ResponseID,
 		history:        st.history,
-	}
-	p.mu.Unlock()
+	})
 
 	p.log.Infof("turn done conv=%s prompt_chars=%d history_turns=%d out_chars=%d reasoning_chars=%d total_ms=%d",
 		shortID(res.ConversationID), len(wire), len(st.history), len(res.Content), len(res.Reasoning), res.Duration.Milliseconds())
@@ -242,9 +235,7 @@ func shortID(id string) string {
 // NewChat forgets every conversation and transcript so the next turn starts
 // fresh.
 func (p *Provider) NewChat() error {
-	p.mu.Lock()
-	p.convs = map[string]convState{}
-	p.mu.Unlock()
+	p.convs.Clear()
 	return nil
 }
 

@@ -3,7 +3,6 @@ package chatgptweb
 import (
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/chimera/chimera/internal/config"
@@ -30,8 +29,7 @@ type Provider struct {
 	sess   *webapi.Session
 	log    *logging.Logger
 
-	mu    sync.Mutex
-	convs map[string]convState
+	convs webapi.ConvStore[convState]
 }
 
 type convState struct {
@@ -42,9 +40,8 @@ type convState struct {
 // New returns an uninitialized web transport; call Init before serving.
 func New(cfg *config.Config) *Provider {
 	return &Provider{
-		cfg:   cfg,
-		convs: map[string]convState{},
-		log:   logging.New("chatgpt-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
+		cfg: cfg,
+		log: logging.New("chatgpt-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
 	}
 }
 
@@ -93,9 +90,7 @@ func (p *Provider) Init(_ *rod.Page, cfg *config.Config) error {
 func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderResponse, error) {
 	start := time.Now()
 
-	p.mu.Lock()
-	conv, ok := p.convs[threadID]
-	p.mu.Unlock()
+	conv, ok := p.convs.Get(threadID)
 
 	var conversationID, parentID string
 	if ok {
@@ -110,13 +105,11 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 		res.Conversation = conversationID
 	}
 
-	p.mu.Lock()
 	parent := res.MessageID
 	if parent == "" {
 		parent = parentID
 	}
-	p.convs[threadID] = convState{conversationID: res.Conversation, parentMessageID: parent}
-	p.mu.Unlock()
+	p.convs.Set(threadID, convState{conversationID: res.Conversation, parentMessageID: parent})
 
 	gen := res.Duration - res.TTFT
 	p.log.Infof("turn done conversation=%s prompt_chars=%d ttft_ms=%d total_ms=%d gen_ms=%d reasoning_chars=%d",
@@ -139,9 +132,7 @@ func shortID(id string) string {
 
 // NewChat forgets every conversation so the next turn starts fresh.
 func (p *Provider) NewChat() error {
-	p.mu.Lock()
-	p.convs = map[string]convState{}
-	p.mu.Unlock()
+	p.convs.Clear()
 	return nil
 }
 

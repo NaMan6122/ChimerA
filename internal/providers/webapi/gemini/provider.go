@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/chimera/chimera/internal/config"
@@ -31,16 +30,14 @@ type Provider struct {
 	sess   *webapi.Session
 	log    *logging.Logger
 
-	mu    sync.Mutex
-	convs map[string]TurnMeta
+	convs webapi.ConvStore[TurnMeta]
 }
 
 // New returns an uninitialized web transport; call Init before serving.
 func New(cfg *config.Config) *Provider {
 	return &Provider{
-		cfg:   cfg,
-		convs: map[string]TurnMeta{},
-		log:   logging.New("gemini-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
+		cfg: cfg,
+		log: logging.New("gemini-web", cfg.LogDir, cfg.LogLevel, cfg.Verbose),
 	}
 }
 
@@ -84,9 +81,7 @@ func (p *Provider) Init(_ *rod.Page, cfg *config.Config) error {
 func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderResponse, error) {
 	start := time.Now()
 
-	p.mu.Lock()
-	meta, ok := p.convs[threadID]
-	p.mu.Unlock()
+	meta, ok := p.convs.Get(threadID)
 
 	res, err := p.client.Send(text, meta)
 	if err != nil && ok && !errors.Is(err, webapi.ErrWAF) && !errors.Is(err, webapi.ErrSessionExpired) {
@@ -100,14 +95,12 @@ func (p *Provider) SendMessage(text string, threadID string) (*models.ProviderRe
 		return nil, err
 	}
 
-	p.mu.Lock()
-	p.convs[threadID] = TurnMeta{
+	p.convs.Set(threadID, TurnMeta{
 		ConversationID: res.ConversationID,
 		ResponseID:     res.ResponseID,
 		CandidateID:    res.CandidateID,
 		TurnIndex:      meta.TurnIndex + 1,
-	}
-	p.mu.Unlock()
+	})
 
 	p.log.Infof("turn done conv=%s turn=%d prompt_chars=%d out_chars=%d ttft=– total_ms=%d",
 		shortID(res.ConversationID), meta.TurnIndex, len(text), len(res.Content), res.Duration.Milliseconds())
@@ -128,9 +121,7 @@ func shortID(id string) string {
 
 // NewChat forgets every conversation so the next turn starts fresh.
 func (p *Provider) NewChat() error {
-	p.mu.Lock()
-	p.convs = map[string]TurnMeta{}
-	p.mu.Unlock()
+	p.convs.Clear()
 	return nil
 }
 

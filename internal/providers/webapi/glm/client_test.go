@@ -252,9 +252,7 @@ func TestProviderEndToEnd(t *testing.T) {
 
 	// Hygiene: a poisoned continuation pointer self-heals onto a fresh
 	// conversation and the orphaned one gets deleted off the response path.
-	p.mu.Lock()
-	p.convs["thread-2"] = "poison"
-	p.mu.Unlock()
+	p.convs.Set("thread-2", "poison")
 	if _, err := p.SendMessage("again", "thread-2"); err != nil {
 		t.Fatalf("self-heal turn: %v", err)
 	}
@@ -271,5 +269,12 @@ func TestProviderEndToEnd(t *testing.T) {
 	// entry (live finding, 2026-11-13).
 	if err := p.client.DeleteConversation("poison"); err == nil {
 		t.Error("repeat delete returned nil — status:1 in an HTTP 200 envelope must be an error")
+	}
+
+	if err := p.NewChat(); err != nil {
+		t.Fatalf("NewChat: %v", err)
+	}
+	if p.convs.Len() != 0 {
+		t.Fatalf("NewChat did not clear glm conversations: len=%d", p.convs.Len())
 	}
 }
