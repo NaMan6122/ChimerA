@@ -1,0 +1,11 @@
+# Code owners — every path is owned by the maintainer.
+#
+# With "Require review from Code Owners" enabled on `main`, a pull request can
+# only be approved by @NaMan6122. Approvals from anyone else still appear on the
+# PR, but GitHub only counts reviews from code owners (and, on a public repo,
+# only from accounts with write access) toward the required approval.
+#
+# Contributors do not need write access: they raise issues and open pull
+# requests from a fork, which is all the collaborator permission model allows
+# them to do here.
+* @NaMan6122
