@@ -37,6 +37,12 @@ import (
 	"github.com/go-rod/rod"
 )
 
+// log_ is built before the config exists, so its arguments are only
+// pre-Configure defaults. logging.Configure (called right after config.Load)
+// re-points this logger and every other one created at init - api, browser,
+// pool, session - at cfg.LogDir/cfg.LogLevel/cfg.Verbose, so LOG_DIR,
+// LOG_LEVEL and VERBOSE are honoured without threading a *config.Config into
+// packages that do not have one.
 var log_ = logging.New("main", "./logs", "debug", true)
 
 // version is stamped at install time with -ldflags "-X main.version=...".
@@ -132,6 +138,13 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	// The config is now authoritative for logging: without this the
+	// package-level loggers keep logging debug to ./logs whatever the
+	// environment says. Same call serves the HTTP and the MCP path.
+	logging.Configure(cfg.LogDir, cfg.LogLevel, cfg.Verbose)
+
+	// Transport is part of what is worth logging, and a pooled gateway has no
+	// single provider URL to print.
 	log_.Infof("Chimera starting (provider=%s, transport=%s, port=%d)", cfg.Provider, cfg.Transport, cfg.APIPort)
 	if !cfg.IsPooled() {
 		log_.Infof("Provider URL: %s", cfg.ProviderURL())

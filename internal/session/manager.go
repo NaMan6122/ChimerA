@@ -12,6 +12,8 @@ import (
 	"github.com/chimera/chimera/internal/logging"
 )
 
+// Pre-Configure defaults: logging.Configure (called once config.Load has
+// resolved LOG_DIR/LOG_LEVEL/VERBOSE) re-points this logger at the config.
 var log = logging.New("session", "./logs", "debug", true)
 
 // Manager keeps session_id → conversation URL + Page, with LRU eviction.

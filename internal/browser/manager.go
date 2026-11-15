@@ -15,6 +15,8 @@ import (
 	"github.com/chimera/chimera/internal/logging"
 )
 
+// Pre-Configure defaults: logging.Configure (called once config.Load has
+// resolved LOG_DIR/LOG_LEVEL/VERBOSE) re-points this logger at the config.
 var log = logging.New("browser", "./logs", "debug", true)
 
 // Manager handles browser launch, persistence, and cleanup.
