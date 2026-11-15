@@ -112,6 +112,35 @@ func TestAdoptModelNamesTheFix(t *testing.T) {
 	}
 }
 
+// TestAdoptModelWaitsOutARateLimit is the failure that made "adopt it later"
+// hollow: the gateway rate-limits /models with a burst of one, so whichever
+// probe just spent the token leaves the retry milliseconds away from another
+// 429. Adoption has to wait for the bucket, not give up on the first refusal.
+func TestAdoptModelWaitsOutARateLimit(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]string{{"id": "chimera-deepseek"}},
+		})
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL + "/v1", Token: "t", HTTP: srv.Client()}
+	if err := c.AdoptModel(); err != nil {
+		t.Fatalf("AdoptModel after one 429: %v", err)
+	}
+	if c.Model != "chimera-deepseek" {
+		t.Fatalf("Model = %q", c.Model)
+	}
+	if n := atomic.LoadInt32(&hits); n < 2 {
+		t.Fatalf("made %d requests, want the retry", n)
+	}
+}
+
 // TestCheckModelToleratesProbeTrouble pins the old contract: this is a probe
 // before the run, not a verdict on it. Unreachable and non-200 must not veto a
 // run that Complete would report with its own remedy.

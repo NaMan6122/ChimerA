@@ -170,15 +170,41 @@ func (c *Client) NewSession(id string) {
 // different fix, so each one names its own: an unreachable port is a gateway
 // that was never started, a 401 is the wrong token, a non-200 is the gateway
 // itself, and an empty list is a gateway with no provider session behind it.
+//
+// A 429 is retried rather than reported: the gateway rate-limits this path with
+// a burst of one, so whoever probed a moment earlier (a scan, a health poll, the
+// previous attempt) has already spent the token. Without the wait, an
+// "ask again once the bucket refills" caller would fail 100% of the time, since
+// it retries milliseconds later.
 func (c *Client) Models() ([]string, error) {
+	var lastErr error
+	for attempt, wait := range []time.Duration{0, 500 * time.Millisecond, 1500 * time.Millisecond, 3 * time.Second} {
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+		ids, retry, err := c.modelsOnce()
+		if err == nil {
+			return ids, nil
+		}
+		lastErr = err
+		if !retry || attempt == 3 {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// modelsOnce performs one model-list request, reporting whether a 429 makes a
+// retry worthwhile.
+func (c *Client) modelsOnce() (ids []string, retry bool, err error) {
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(c.BaseURL, "/")+"/models", nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf(`no gateway answered at %s
+		return nil, false, fmt.Errorf(`no gateway answered at %s
   %v
 
   start one:
@@ -189,11 +215,15 @@ func (c *Client) Models() ([]string, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf(`the gateway at %s rejected the token
+		return nil, false, fmt.Errorf(`the gateway at %s rejected the token
   pass the one it was started with:  -token <token>`, c.BaseURL)
 	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, true, fmt.Errorf(`the gateway at %s is rate limiting model discovery (HTTP 429)
+  retry in a moment, or pass -model explicitly`, c.BaseURL)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gateway %s answered %d", c.BaseURL, resp.StatusCode)
+		return nil, false, fmt.Errorf("gateway %s answered %d", c.BaseURL, resp.StatusCode)
 	}
 	var out struct {
 		Data []struct {
@@ -201,19 +231,19 @@ func (c *Client) Models() ([]string, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode %s/models: %w", c.BaseURL, err)
+		return nil, false, fmt.Errorf("decode %s/models: %w", c.BaseURL, err)
 	}
-	ids := make([]string, 0, len(out.Data))
+	ids = make([]string, 0, len(out.Data))
 	for _, m := range out.Data {
 		if m.ID != "" {
 			ids = append(ids, m.ID)
 		}
 	}
 	if len(ids) == 0 {
-		return nil, fmt.Errorf(`the gateway at %s serves no models
+		return nil, false, fmt.Errorf(`the gateway at %s serves no models
   it is listening but has no provider behind it:  chimera auth login <provider>`, c.BaseURL)
 	}
-	return ids, nil
+	return ids, false, nil
 }
 
 // AdoptModel takes the model id from the endpoint when the caller gave none. A

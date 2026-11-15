@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fakeGateway(model string) *httptest.Server {
@@ -172,16 +173,138 @@ func TestExplicitBaseBeatsAmbiguity(t *testing.T) {
 		}
 	}
 
-	// An address that is down says nothing about intent: fall back to the picker.
-	if _, needChoice, err := resolveStartup(list, "", "http://localhost:9999/v1"); err != nil || !needChoice {
-		t.Fatalf("dead explicit base: needChoice = %v, err = %v", needChoice, err)
+	// An address that is down is an error, not an invitation to open the only
+	// other gateway: that is the silent substitution this change removes.
+	_, _, err := resolveStartup(list, "", "http://localhost:9999/v1")
+	if err == nil || !strings.Contains(err.Error(), "nothing answered") {
+		t.Fatalf("dead explicit base should be named, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "deepseek") || !strings.Contains(err.Error(), "chatgpt") {
+		t.Fatalf("the error should offer what is live, got: %v", err)
 	}
 
 	// An address and a model that contradict each other are named, not resolved:
 	// silently dropping either would talk to something the user did not ask for.
-	_, _, err := resolveStartup(list, "chimera-kimi", deep.URL)
+	_, _, err = resolveStartup(list, "chimera-kimi", deep.URL)
 	if err == nil || !strings.Contains(err.Error(), "chimera-deepseek") {
 		t.Fatalf("contradictory model/address should list what the address serves, got: %v", err)
+	}
+}
+
+// TestBusyGatewayAcceptsAnExplicitModel: a gateway that answered /health but not
+// /models has nothing to contradict the request, so naming it and its model must
+// not be refused with an empty "serves , not ..." message.
+func TestBusyGatewayAcceptsAnExplicitModel(t *testing.T) {
+	busy := []backend{{BaseURL: "http://localhost:8010/v1", Up: true,
+		Note: "busy (HTTP 429): the gateway rate-limits model discovery"}}
+
+	b, needChoice, err := resolveStartup(busy, "chimera-deepseek", "http://localhost:8010/v1")
+	if err != nil || needChoice {
+		t.Fatalf("needChoice = %v, err = %v; want the named gateway", needChoice, err)
+	}
+	if b.BaseURL != "http://localhost:8010/v1" {
+		t.Fatalf("opened %s", b.BaseURL)
+	}
+}
+
+// TestPooledModelSelectionPicksTheRequestedID: on a pool, data[0] is the
+// alphabetically first provider, so adopting it would answer with the wrong
+// model while claiming to honour -model.
+func TestPooledModelSelectionPicksTheRequestedID(t *testing.T) {
+	pool := fakeGatewayIDs("chimera-chatgpt", "chimera-deepseek")
+	defer pool.Close()
+	list := scan(defaultProbeClient(), []string{pool.URL}, "t")
+
+	for want, id := range map[string]string{
+		"deepseek":        "chimera-deepseek",
+		"chimera-gpt":     "", // not served
+		"chimera-chatgpt": "chimera-chatgpt",
+		"chatgpt":         "chimera-chatgpt",
+	} {
+		b, _, err := resolveStartup(list, want, "")
+		if id == "" {
+			if err == nil {
+				t.Errorf("resolveStartup(%q) should have failed", want)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("resolveStartup(%q): %v", want, err)
+			continue
+		}
+		if b.Model != id {
+			t.Errorf("resolveStartup(%q) chose model %q, want %q", want, b.Model, id)
+		}
+		// The label has to follow the model: a pool must not answer for
+		// -model deepseek while calling itself chatgpt.
+		wantProvider := strings.TrimPrefix(id, "chimera-")
+		if b.Provider != wantProvider {
+			t.Errorf("resolveStartup(%q) labelled the backend %q, want %q", want, b.Provider, wantProvider)
+		}
+	}
+}
+
+// TestHealthURLKeepsMountPrefix: a gateway served under /gw/v1 exposes
+// /gw/health, not /health — probing the origin would call a live gateway absent.
+func TestHealthURLKeepsMountPrefix(t *testing.T) {
+	cases := map[string]string{
+		"http://localhost:8010/v1":    "http://localhost:8010/health",
+		"http://localhost:8010/gw/v1": "http://localhost:8010/gw/health",
+		"localhost:8010":              "http://localhost:8010/health",
+	}
+	for in, want := range cases {
+		if got := healthURL(in); got != want {
+			t.Errorf("healthURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestSlowHealthFallsBackToModels: the probe deadline is 700ms, so a gateway
+// that is merely slow on /health must not be declared absent while /models
+// answers.
+func TestSlowHealthFallsBackToModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			time.Sleep(120 * time.Millisecond)
+			w.WriteHeader(http.StatusOK)
+		case "/models":
+			fmt.Fprint(w, `{"data":[{"id":"chimera-deepseek","owned_by":"deepseek"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	fast := &http.Client{Timeout: 50 * time.Millisecond}
+	list := scan(fast, []string{srv.URL}, "t")
+	if len(list) != 1 || !list[0].Up {
+		t.Fatalf("slow /health hid a live gateway: %+v", list)
+	}
+	if list[0].Model != "chimera-deepseek" {
+		t.Fatalf("model = %q", list[0].Model)
+	}
+}
+
+// TestCanonicalKeySpellings: the loopback spellings people actually type collapse
+// to one identity, but ::1 stays distinct — a 127.0.0.1-bound gateway is not
+// reachable as ::1 and must remain visible as its own row.
+func TestCanonicalKeySpellings(t *testing.T) {
+	same := []string{
+		"http://localhost:8010/v1",
+		"http://127.0.0.1:8010/v1",
+		"http://0.0.0.0:8010/v1",
+		"localhost:8010",
+		"http://LOCALHOST:8010/v1/",
+	}
+	want := canonicalKey(same[0])
+	for _, u := range same[1:] {
+		if got := canonicalKey(u); got != want {
+			t.Errorf("canonicalKey(%q) = %q, want %q", u, got, want)
+		}
+	}
+	if canonicalKey("http://[::1]:8010/v1") == want {
+		t.Error("[::1] collapsed into localhost; it is a different listener")
 	}
 }
 

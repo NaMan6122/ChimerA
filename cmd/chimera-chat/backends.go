@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -65,9 +67,11 @@ func canonicalKey(raw string) string {
 	if err != nil || u.Host == "" {
 		return strings.ToLower(n)
 	}
+	// Fold only the IPv4 loopback spellings: ::1 is a different listener, and a
+	// gateway bound to 127.0.0.1 is genuinely not reachable as [::1].
 	host := strings.ToLower(u.Hostname())
 	switch host {
-	case "127.0.0.1", "::1", "[::1]":
+	case "127.0.0.1", "0.0.0.0", "localhost.":
 		host = "localhost"
 	}
 	port := u.Port()
@@ -182,17 +186,24 @@ func probe(client *http.Client, base, token string) backend {
 // non-chimera OpenAI-compatible server (no /health) falls back to /v1/models
 // deciding liveness on its own.
 func probeHealth(client *http.Client, base string) (alive, conclusive bool) {
-	origin := originOf(base)
-	if origin == "" {
+	url := healthURL(base)
+	if url == "" {
 		return false, false
 	}
-	req, err := http.NewRequest(http.MethodGet, origin+"/health", nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return false, false
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, true // refused or killed: nothing is listening
+		// A timeout or a TLS failure says nothing about whether a gateway is
+		// there: the client deadline is shorter than a busy gateway takes, and
+		// self-signed certs are a configuration mistake, not an absence. Only a
+		// refused or unreachable connection is conclusive.
+		if slowOrTLS(err) {
+			return false, false
+		}
+		return false, true
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
@@ -206,13 +217,33 @@ func probeHealth(client *http.Client, base string) (alive, conclusive bool) {
 	}
 }
 
-// originOf strips the /v1 path so the un-prefixed /health can be addressed.
-func originOf(base string) string {
-	u, err := url.Parse(normalizeBase(base))
-	if err != nil || u.Scheme == "" || u.Host == "" {
+// healthURL addresses the un-prefixed /health: the API path is dropped, but any
+// mount prefix is kept, because a gateway served under /gw/v1 exposes
+// /gw/health — stripping to the origin would probe a path it does not have and
+// then treat a busy gateway as absent.
+func healthURL(base string) string {
+	n := normalizeBase(base)
+	if n == "" {
 		return ""
 	}
-	return u.Scheme + "://" + u.Host
+	mount := strings.TrimSuffix(n, "/v1")
+	if mount == n { // not an API path: assume the base is the mount
+		mount = n
+	}
+	return strings.TrimRight(mount, "/") + "/health"
+}
+
+// slowOrTLS reports errors that leave liveness undecided: the request timed out,
+// or the TLS handshake failed on a certificate a human has to look at.
+func slowOrTLS(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "x509") ||
+		strings.Contains(msg, "tls:") ||
+		strings.Contains(msg, "certificate")
 }
 
 // probeModels reads the model list, returning every id and the gateway's own
@@ -312,6 +343,47 @@ func servesModel(b backend, want string) bool {
 	return b.Provider != "" && strings.EqualFold(b.Provider, want)
 }
 
+// modelFor returns the id that satisfies a requested model or provider. On a
+// pooled gateway the answer is not data[0]: the pool lists one model per
+// provider, and adopting the first would route the turn to the wrong one.
+func modelFor(b backend, want string) (string, bool) {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return "", false
+	}
+	for i, id := range servedModels(b) {
+		if id == want {
+			return id, true
+		}
+		owner := ""
+		if i < len(b.Owners) {
+			owner = b.Owners[i]
+		}
+		if strings.EqualFold(providerFor(id, owner), want) {
+			return id, true
+		}
+	}
+	if len(servedModels(b)) == 0 && b.Provider != "" && strings.EqualFold(b.Provider, want) {
+		return b.Model, true
+	}
+	return "", false
+}
+
+// providerForID names the provider of one id a backend serves, using the owner
+// the gateway declared for that id when it did.
+func providerForID(b backend, id string) string {
+	for i, m := range servedModels(b) {
+		if m == id {
+			owner := ""
+			if i < len(b.Owners) {
+				owner = b.Owners[i]
+			}
+			return providerFor(id, owner)
+		}
+	}
+	return providerFor(id, "")
+}
+
 // matchBase finds the live backend an address refers to, comparing canonical
 // identities so localhost and 127.0.0.1 are interchangeable.
 func matchBase(up []backend, base string) (backend, bool) {
@@ -387,19 +459,39 @@ func resolveStartup(list []backend, wantModel, wantBase string) (b backend, need
 	}
 
 	if wantBase != "" {
-		if match, ok := matchBase(up, wantBase); ok {
-			if wantModel == "" || servesModel(match, wantModel) {
-				return match, false, nil
-			}
-			return backend{}, false, fmt.Errorf("%s serves %s, not %q\n"+
-				"  drop -model to use what it serves, or point at a gateway that has it",
-				match.BaseURL, strings.Join(servedModels(match), ", "), wantModel)
+		match, ok := matchBase(up, wantBase)
+		if !ok {
+			// The user named an address; opening a different one because it
+			// happens to be the only thing listening is the silent substitution
+			// this whole change exists to remove.
+			return backend{}, false, fmt.Errorf("nothing answered at %s\n"+
+				"  start it:   chimera up deepseek      (or: chimera up)\n"+
+				"  or drop -base-url and use one of: %s", wantBase, liveNames(up))
 		}
+		if wantModel == "" {
+			return match, false, nil
+		}
+		// A gateway that answered /health but not /models (429, rejected token)
+		// has nothing to contradict the request; its model is adopted at start.
+		if len(servedModels(match)) == 0 {
+			return match, false, nil
+		}
+		if id, ok := modelFor(match, wantModel); ok {
+			match.Model, match.Provider = id, providerForID(match, id)
+			return match, false, nil
+		}
+		return backend{}, false, fmt.Errorf("%s serves %s, not %q\n"+
+			"  drop -model to use what it serves, or point at a gateway that has it",
+			match.BaseURL, strings.Join(servedModels(match), ", "), wantModel)
 	}
 
 	if wantModel != "" {
 		for _, x := range up {
-			if servesModel(x, wantModel) {
+			if id, ok := modelFor(x, wantModel); ok {
+				// Label the backend by the model actually chosen: a pool serving
+				// five providers must not answer for -model deepseek under the
+				// name of whichever provider it listed first.
+				x.Model, x.Provider = id, providerForID(x, id)
 				return x, false, nil
 			}
 		}

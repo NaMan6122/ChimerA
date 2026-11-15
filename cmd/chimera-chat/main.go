@@ -740,6 +740,15 @@ func (m *model) scan(target string) tea.Cmd {
 // switchBackend repoints the session at another gateway. A fresh session id is
 // used because the previous conversation lives in the old gateway.
 func (m *model) switchBackend(b backend) {
+	if b.Model == "" {
+		// Alive but not talking about models yet (rate limited, token rejected).
+		// Switching now would send an empty model id, which the gateway resolves
+		// to its default provider — a different conversation than the one asked
+		// for, with no error to show for it.
+		m.append(kindError, fmt.Sprintf("%s has not reported a model yet (%s)\ntry /use again in a moment", b.BaseURL, b.Note))
+		m.refreshViewport()
+		return
+	}
 	m.client = spin.NewClient(b.BaseURL, m.token, b.Model, fmt.Sprintf("chat-%d", time.Now().UnixNano()))
 	m.client.Refresh()
 	m.rewire()
