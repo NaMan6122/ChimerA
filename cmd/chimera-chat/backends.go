@@ -148,6 +148,87 @@ func resolveTarget(list []backend, arg string) (backend, error) {
 	return backend{}, fmt.Errorf("%q is not a live backend\n  live: %s", arg, strings.Join(names, ", "))
 }
 
+// resolveStartup decides which gateway the chat opens against, before any UI
+// exists. wantModel is the -model flag; empty means "whatever the gateway
+// serves", because a gateway serves exactly one provider and therefore one
+// model — the model id is a property of the backend, not something the user
+// should have to restate on the command line.
+//
+// It returns needChoice when several live gateways could serve, leaving the
+// pick to whoever can ask a human. An explicit model that no live gateway
+// serves is an error, not something to silently override.
+func resolveStartup(list []backend, wantModel string) (b backend, needChoice bool, err error) {
+	var up []backend
+	for _, x := range list {
+		if x.Up {
+			up = append(up, x)
+		}
+	}
+	if len(up) == 0 {
+		return backend{}, false, noGatewayError(list)
+	}
+	if wantModel != "" {
+		for _, x := range up {
+			// Accept the id the gateway reports, and the bare provider name so
+			// `-model deepseek` reads naturally.
+			if x.Model == wantModel || strings.EqualFold(x.Provider, wantModel) {
+				return x, false, nil
+			}
+		}
+		return backend{}, false, fmt.Errorf("no live gateway serves %q\n  live: %s", wantModel, liveNames(up))
+	}
+	if len(up) == 1 {
+		return up[0], false, nil
+	}
+	return backend{}, true, nil
+}
+
+// preferred is the pick for a caller that cannot ask a human: the address the
+// session already pointed at if it answered, else the first live gateway in
+// scan order.
+func preferred(list []backend, baseURL string) (backend, bool) {
+	var up []backend
+	for _, b := range list {
+		if b.Up {
+			up = append(up, b)
+		}
+	}
+	if len(up) == 0 {
+		return backend{}, false
+	}
+	want := strings.TrimRight(baseURL, "/")
+	for _, b := range up {
+		if strings.EqualFold(strings.TrimRight(b.BaseURL, "/"), want) {
+			return b, true
+		}
+	}
+	return up[0], true
+}
+
+// liveNames formats live gateways as "provider (url)" for error messages.
+func liveNames(up []backend) string {
+	names := make([]string, 0, len(up))
+	for _, b := range up {
+		names = append(names, b.Provider+" ("+b.BaseURL+")")
+	}
+	return strings.Join(names, ", ")
+}
+
+// noGatewayError explains an empty scan with the commands that fix it. It looks
+// at the failed probes first: a gateway that answered 401 is a token problem,
+// and saying "no gateway" there would send the user to the wrong fix.
+func noGatewayError(list []backend) error {
+	for _, b := range list {
+		if strings.Contains(b.Err, "401") || strings.Contains(b.Err, "403") {
+			return fmt.Errorf("a gateway answered on %s but rejected the token\n"+
+				"  pass the token it was started with:  -token <token>", b.BaseURL)
+		}
+	}
+	return fmt.Errorf("no gateway answered on localhost:8000-8011\n" +
+		"  start one:     chimera up deepseek      (or: chimera up — every provider with a session)\n" +
+		"  no session?    chimera auth login deepseek")
+}
+
 // renderBackends formats the list for the transcript.
 func renderBackends(list []backend, current string) string {
 	var b strings.Builder

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
 
 	"github.com/chimera/chimera/internal/sessions"
 	"github.com/chimera/chimera/internal/spin"
@@ -139,7 +141,10 @@ func main() {
 	)
 	flag.StringVar(&baseURL, "base-url", envOr("CHIMERA_BASE_URL", "http://localhost:8000/v1"), "gateway base URL")
 	flag.StringVar(&token, "token", envOr("CHIMERA_API_KEY", "chimera"), "bearer token")
-	flag.StringVar(&modelID, "model", "chimera-chatgpt", "model id")
+	// Empty means "whatever the gateway serves": a gateway serves one provider,
+	// so its model id is discoverable and restating it is a trap — asking a
+	// DeepSeek gateway for chimera-chatgpt used to abort before the UI started.
+	flag.StringVar(&modelID, "model", "", "model id (default: whatever the gateway serves)")
 	flag.StringVar(&session, "session", "", "session id (default: a fresh one)")
 	flag.StringVar(&root, "root", ".", "workspace root the tools are confined to")
 	flag.IntVar(&maxRounds, "max-rounds", 16, "hard stop on tool rounds per message")
@@ -155,8 +160,9 @@ func main() {
 		fmt.Println("chimera-chat " + version)
 		return
 	}
+	probePorts := portRange(8000, 8011)
 	if listBackends {
-		list := scan(defaultProbeClient(), probeTargets(baseURL, portRange(8000, 8011)), token)
+		list := scan(defaultProbeClient(), probeTargets(baseURL, probePorts), token)
 		var live []backend
 		for _, b := range list {
 			if b.Up {
@@ -165,12 +171,52 @@ func main() {
 		}
 		if len(live) == 0 {
 			fmt.Println("no gateway answered on localhost:8000-8011")
-			fmt.Println("start one:  TRANSPORT=webapi PROVIDER=deepseek API_PORT=8010 chimera")
+			fmt.Println("start one:  chimera up deepseek      (all of them: chimera up)")
 			return
 		}
 		fmt.Println(renderBackends(live, baseURL))
 		return
 	}
+
+	// Resolve the backend before building the client. Discovery answers both
+	// questions the flags used to demand: which gateway, and what it serves.
+	// One scan is reused for the picker, for the fallback, and for the wording
+	// of a failure — re-probing per branch would triple the startup cost.
+	list := scan(defaultProbeClient(), probeTargets(baseURL, probePorts), token)
+	b, needChoice, err := resolveStartup(list, modelID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if needChoice {
+		if !isTTY(os.Stdin) {
+			// Nobody to ask: take the deterministic pick so the message below
+			// names a concrete backend instead of stalling on a keypress.
+			b, _ = preferred(list, baseURL)
+		} else {
+			b, err = chooseBackend(list, baseURL, probePorts, token)
+			if errors.Is(err, errNoBackendChosen) {
+				return
+			}
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "chooser:", err)
+				os.Exit(1)
+			}
+		}
+	}
+	baseURL, modelID = b.BaseURL, b.Model
+
+	// The TUI needs a terminal. Piped or redirected stdin has no keypresses to
+	// read, so bubbletea would sit on the pipe forever; refusing with the
+	// resolved backend is more use than a hang, and one line shows the headless
+	// equivalent for whoever meant to script this.
+	if !isTTY(os.Stdin) {
+		fmt.Fprintf(os.Stderr, "chimera-chat needs a terminal — would open %s on %s (model %s)\n",
+			b.Provider, b.BaseURL, modelID)
+		fmt.Fprintf(os.Stderr, "  headless: chimera-spin -base-url %s -model %s \"<task>\"\n", baseURL, modelID)
+		os.Exit(2)
+	}
+
 	if session == "" {
 		session = fmt.Sprintf("chat-%d", time.Now().UnixNano())
 	}
@@ -181,6 +227,8 @@ func main() {
 	}
 
 	client := spin.NewClient(baseURL, token, modelID, session)
+	// Still checked: discovery and this request are separate round trips, so a
+	// gateway restarted onto another provider in between must not look healthy.
 	if err := client.CheckModel(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -193,7 +241,7 @@ func main() {
 		token:       token,
 		root:        absRoot,
 		maxRounds:   maxRounds,
-		probePorts:  portRange(8000, 8011),
+		probePorts:  probePorts,
 		autoScroll:  true,
 		sessionsDir: sessionsDir,
 	}
@@ -230,7 +278,8 @@ func main() {
 	m.spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	m.viewport = viewport.New(80, 20)
-	m.append(kindNotice, fmt.Sprintf("session %s · model %s · root %s", short(session), modelID, absRoot))
+	m.append(kindNotice, fmt.Sprintf("%s · model %s · session %s · root %s",
+		b.Provider, modelID, short(session), absRoot))
 
 	if _, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "chat:", err)
@@ -453,24 +502,7 @@ func (m *model) brandView() string {
 
 	var b strings.Builder
 	for i, r := range brand {
-		d := pos - i
-		if d < 0 {
-			d = -d
-		}
-		var colour lipgloss.Color
-		switch {
-		case d == 0:
-			colour = "214" // amber core
-		case d <= 2:
-			colour = "208"
-		case d <= 4:
-			colour = "203"
-		case d <= 7:
-			colour = "240"
-		default:
-			colour = "238"
-		}
-		b.WriteString(lipgloss.NewStyle().Foreground(colour).Render(string(r)))
+		b.WriteString(lipgloss.NewStyle().Foreground(bandColour(abs(pos - i))).Render(string(r)))
 	}
 	pad := strings.Repeat(" ", max(0, m.width-len(brand)-2))
 	return pad + b.String() + "  "
@@ -859,6 +891,14 @@ func short(id string) string {
 		return id[:12]
 	}
 	return id
+}
+
+// isTTY reports whether f is an interactive terminal, i.e. whether a human can
+// be asked a question or press a key. A character device is not sufficient:
+// /dev/null is one too, and a redirect from it means no keypress will ever
+// arrive — the difference between a prompt and a hang.
+func isTTY(f *os.File) bool {
+	return term.IsTerminal(int(f.Fd()))
 }
 
 func envOr(k, def string) string {
