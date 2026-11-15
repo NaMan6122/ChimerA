@@ -45,46 +45,50 @@ func parseLevel(s string) Level {
 type target struct {
 	// mu is held for reading for the whole of one line (check, format, write)
 	// and exclusively to re-point the target, so Configure can close the
-	// previous file without a write racing into it.
+	// previous file without a write racing into it. format lives here rather
+	// than on Logger for the same reason: it is read while formatting a line,
+	// so it has to move with the target and sit under the lock that guards it.
 	mu      sync.RWMutex
 	level   Level
 	dir     string
 	verbose bool
+	format  string
 	file    *os.File  // nil when the log file could not be opened
 	out     io.Writer // stderr-if-verbose plus the file, or a discard
 }
 
 // Logger is a simple leveled logger.
-// Format is chosen once via LOG_FORMAT=json (default: text). Use
-// WithRequestID to tag all lines from one HTTP request (chi RequestID).
+// Use WithRequestID to tag all lines from one HTTP request (chi RequestID).
 type Logger struct {
-	name   string
-	format string
-	reqID  string
-	t      *target
+	name  string
+	reqID string
+	t     *target
 }
 
 // New creates a new Logger writing to stderr (if verbose) and a log file.
 // The arguments are pre-config defaults: Configure re-points every logger New
-// has returned, so a package-level logger built at init still honours the
-// resolved config once the config is loaded.
+// has returned, and a logger built after Configure is immediately re-pointed
+// onto that configuration, so a package-level logger built at init still
+// honours the resolved config once the config is loaded.
 func New(name, logDir, level string, verbose bool) *Logger {
 	l := &Logger{
-		name:   name,
-		format: logFormat(),
+		name: name,
 		t: &target{
 			level:   parseLevel(level),
 			dir:     logDir,
 			verbose: verbose,
-			file:    openLogFile(name, logDir),
+			format:  logFormat(),
 		},
 	}
+	l.t.file = openLogFile(name, logDir)
 	l.t.out = l.t.buildOut()
 	register(l)
 	return l
 }
 
-// logFormat reads LOG_FORMAT once per logger; anything but "json" is text.
+// logFormat reads LOG_FORMAT; anything but "json" is text. New and Configure
+// both call it, so Configure can fix the loggers built before LOG_FORMAT was
+// visible instead of leaving them on the format they happened to see at init.
 func logFormat() string {
 	if strings.ToLower(strings.TrimSpace(os.Getenv("LOG_FORMAT"))) == "json" {
 		return "json"
@@ -116,19 +120,44 @@ func (t *target) buildOut() io.Writer {
 
 var (
 	// regMu guards the logger registry, which exists so Configure can reach
-	// loggers that were built at init, long before config.Load ran.
+	// loggers that were built at init, long before config.Load ran. It also
+	// guards applied so the two move together: see register.
 	regMu   sync.Mutex
 	loggers []*Logger
+	applied *config
 
 	// configureMu serializes Configure calls: half-applied re-pointing would
 	// leave some loggers on ./logs and some on LOG_DIR.
 	configureMu sync.Mutex
 )
 
+// config is one resolved Configure call, kept package-wide so a logger created
+// afterwards does not keep whatever arguments its New call happened to pass.
+type config struct {
+	dir     string
+	level   Level
+	verbose bool
+	format  string
+}
+
+// register adds l to the registry and replays the last Configure onto it.
+//
+// Both steps happen against regMu, which is what Configure holds while it
+// records the new config and copies the registry: a logger either sees the
+// recorded config here, or was already registered when Configure took its
+// snapshot. There is no window where it misses both. Configure itself is not
+// called, because Configure blocks all loggers and would deadlock here.
 func register(l *Logger) {
 	regMu.Lock()
 	loggers = append(loggers, l)
+	last := applied
 	regMu.Unlock()
+
+	// Re-point outside regMu: reconfigure takes the target lock, and a slow
+	// filesystem must not block New on another goroutine.
+	if last != nil {
+		l.reconfigure(last.dir, last.level, last.verbose, last.format)
+	}
 }
 
 // Configure makes dir, level and verbose authoritative for every logger this
@@ -142,33 +171,53 @@ func Configure(dir, level string, verbose bool) {
 	defer configureMu.Unlock()
 
 	regMu.Lock()
+	// Record the config under the same lock that serialises the snapshot, so
+	// a concurrent New cannot miss it. LOG_FORMAT is read here rather than per
+	// logger, so one call fixes the formatting of the loggers built at init.
+	applied = &config{dir: dir, level: lvl, verbose: verbose, format: logFormat()}
 	targets := make([]*Logger, len(loggers))
 	copy(targets, loggers)
+	cfg := *applied
 	regMu.Unlock()
 
 	// Re-point outside regMu: each logger takes its own target lock, and a
 	// slow filesystem must not block New on another goroutine.
 	for _, l := range targets {
-		l.reconfigure(dir, lvl, verbose)
+		l.reconfigure(cfg.dir, cfg.level, cfg.verbose, cfg.format)
 	}
 }
 
 // reconfigure moves one logger onto a new target. The new file is opened
-// before the old handle is closed, so a failed open still leaves stderr; the
-// close happens under the exclusive lock, so no line can land in the old
-// directory after Configure returns.
-func (l *Logger) reconfigure(dir string, lvl Level, verbose bool) {
+// before the old handle is closed, so a failed open degrades instead of
+// losing lines; the close happens under the exclusive lock, so no line can
+// land in the old directory after Configure returns.
+func (l *Logger) reconfigure(dir string, lvl Level, verbose bool, format string) {
 	t := l.t
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if t.dir == dir && t.level == lvl && t.verbose == verbose {
+	// file==nil belongs in the guard: a logger whose first open failed would
+	// otherwise never retry, because its arguments already match the config.
+	if t.dir == dir && t.level == lvl && t.verbose == verbose && t.format == format && t.file != nil {
 		return // already configured; reopening would only churn descriptors
 	}
 
+	f := openLogFile(l.name, dir)
+	if f == nil {
+		// Keep the working handle and the writer that wraps it. Swapping in
+		// buildOut() here would hand back a discard whenever VERBOSE=false -
+		// the production setting - and every line for the rest of the process
+		// would vanish silently. t.dir is left alone so the next Configure
+		// retries the open rather than believing it already succeeded.
+		t.level, t.verbose, t.format = lvl, verbose, format
+		t.out = t.buildOut()
+		fmt.Fprintf(os.Stderr, "[%s] WARN   log directory %q could not be opened; logging continues to %q\n", l.name, dir, t.dir)
+		return
+	}
+
 	old := t.file
-	t.dir, t.level, t.verbose = dir, lvl, verbose
-	t.file = openLogFile(l.name, dir)
+	t.dir, t.level, t.verbose, t.format = dir, lvl, verbose, format
+	t.file = f
 	t.out = t.buildOut()
 	if old != nil {
 		_ = old.Close()
@@ -211,9 +260,10 @@ func (l *Logger) emitf(lvl Level, level, format string, args ...any) {
 	l.write(t.out, level, fmt.Sprintf(format, args...))
 }
 
-// write formats one record onto out. The caller holds t.mu.
+// write formats one record onto out. The caller holds t.mu for reading, which
+// is what makes reading t.format here safe against a concurrent Configure.
 func (l *Logger) write(out io.Writer, level, msg string) {
-	if l.format == "json" {
+	if l.t.format == "json" {
 		rec := map[string]string{
 			"ts":     time.Now().Format(time.RFC3339),
 			"level":  strings.ToLower(level),

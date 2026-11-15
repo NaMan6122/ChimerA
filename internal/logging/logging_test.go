@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -8,6 +9,22 @@ import (
 	"sync"
 	"testing"
 )
+
+// resetForTest clears the registry and the recorded Configure. Both are
+// process-wide by design, so without this one test's loggers and directory
+// would be re-pointed by the next test's Configure - and a logger built after
+// that Configure would adopt the previous test's configuration.
+func resetForTest(t *testing.T) {
+	t.Helper()
+	clear := func() {
+		regMu.Lock()
+		loggers = nil
+		applied = nil
+		regMu.Unlock()
+	}
+	clear()
+	t.Cleanup(clear)
+}
 
 // readLog returns the contents of <dir>/<name>.log, empty when absent.
 func readLog(t *testing.T, dir, name string) string {
@@ -49,6 +66,7 @@ func captureStderr(t *testing.T) (*os.File, func() string) {
 // (a) Configure redirects new lines into the configured directory and stops
 // writing to the directory New opened.
 func TestConfigureRedirectsOutput(t *testing.T) {
+	resetForTest(t)
 	before, after := t.TempDir(), t.TempDir()
 
 	l := New("redirect", before, "debug", false)
@@ -73,6 +91,7 @@ func TestConfigureRedirectsOutput(t *testing.T) {
 // (b) The configured level actually filters: LOG_LEVEL=error suppresses debug
 // and info.
 func TestConfigureLevelFiltersDebug(t *testing.T) {
+	resetForTest(t)
 	dir := t.TempDir()
 	l := New("filter", dir, "debug", false)
 	l.Debug("debug-before")
@@ -98,6 +117,7 @@ func TestConfigureLevelFiltersDebug(t *testing.T) {
 
 // (c) verbose=false stops the stderr copy while the file keeps the line.
 func TestConfigureVerboseFalseSilencesStderr(t *testing.T) {
+	resetForTest(t)
 	dir := t.TempDir()
 	_, stderr := captureStderr(t)
 
@@ -123,6 +143,7 @@ func TestConfigureVerboseFalseSilencesStderr(t *testing.T) {
 // (d) Every logger created before Configure follows it, including
 // request-scoped copies made with WithRequestID.
 func TestConfigureReachesLoggersCreatedBeforeIt(t *testing.T) {
+	resetForTest(t)
 	before, after := t.TempDir(), t.TempDir()
 
 	one := New("first", before, "debug", false)
@@ -154,6 +175,7 @@ func TestConfigureReachesLoggersCreatedBeforeIt(t *testing.T) {
 // not race or panic (run with -race). Torn lines are possible only in the
 // same way two loggers can interleave, never a lost or crashed write.
 func TestConcurrentLoggingDuringConfigure(t *testing.T) {
+	resetForTest(t)
 	dirs := []string{t.TempDir(), t.TempDir()}
 	l := New("concurrent", dirs[0], "debug", false)
 
@@ -195,5 +217,189 @@ func TestConcurrentLoggingDuringConfigure(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(d, "concurrent.log")); err != nil {
 			t.Fatalf("log file in %s: %v", d, err)
 		}
+	}
+}
+
+// blockedDir returns a path that cannot be opened as a directory, plus the
+// parent to repair it in later. The parent of the path is a regular FILE, so
+// the open fails with ENOTDIR: unlike chmod 0500 this also fails for root, and
+// nothing needs restoring.
+func blockedDir(t *testing.T) (path, parent string) {
+	t.Helper()
+	parent = t.TempDir()
+	path = filepath.Join(parent, "logs")
+	if err := os.WriteFile(path, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("blocking file: %v", err)
+	}
+	return path, parent
+}
+
+// (f) An unwritable LOG_DIR must not cost a single line. With VERBOSE=false the
+// replacement writer would be a discard, so the old handle has to stay open.
+func TestConfigureKeepsLoggingWhenNewDirUnwritable(t *testing.T) {
+	resetForTest(t)
+	good := t.TempDir()
+	blocked, _ := blockedDir(t)
+	_, stderr := captureStderr(t)
+
+	l := New("unwritable", good, "debug", false)
+	l.Info("pre-failure")
+
+	// verbose=false is the production setting, and info is still a real level
+	// change: both must take effect without touching the working handle.
+	Configure(blocked, "info", false)
+	l.Info("after-failure")
+	l.Debug("debug-after-failure")
+
+	got := readLog(t, good, "unwritable")
+	if !strings.Contains(got, "pre-failure") {
+		t.Fatalf("pre-failure line lost: %q", got)
+	}
+	if !strings.Contains(got, "after-failure") {
+		t.Fatalf("line discarded after a failed open: %q", got)
+	}
+	if strings.Contains(got, "debug-after-failure") {
+		t.Fatalf("level change not applied on the failed open: %q", got)
+	}
+	if strings.Contains(got, "could not be opened") {
+		t.Fatalf("warning leaked into the log file: %q", got)
+	}
+	if out := stderr(); !strings.Contains(out, "could not be opened") {
+		t.Fatalf("no warning on stderr: %q", out)
+	}
+}
+
+// (g) A failed first open must be retried by a later Configure with the SAME
+// arguments, otherwise a process that boots before LOG_DIR exists never logs.
+func TestConfigureRetriesFailedFirstOpen(t *testing.T) {
+	resetForTest(t)
+	blocked, _ := blockedDir(t)
+	_, stderr := captureStderr(t)
+
+	l := New("retry", blocked, "debug", false)
+	l.Info("line-before-dir-existed")
+
+	// Identical to the New arguments: without the file==nil term in the
+	// idempotence guard this returns early and never opens anything.
+	Configure(blocked, "debug", false)
+
+	// The directory appears, as `mkdir -p "$LOG_DIR"` in the entrypoint would.
+	if err := os.Remove(blocked); err != nil {
+		t.Fatalf("unblocking: %v", err)
+	}
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatalf("creating log dir: %v", err)
+	}
+	Configure(blocked, "debug", false)
+	l.Info("line-after-dir-appeared")
+
+	got := readLog(t, blocked, "retry")
+	if !strings.Contains(got, "line-after-dir-appeared") {
+		t.Fatalf("failed first open was not retried: %q", got)
+	}
+	if out := stderr(); !strings.Contains(out, "could not be opened") {
+		t.Fatalf("no warning while the directory was missing: %q", out)
+	}
+}
+
+// (h) LOG_FORMAT=json has to reach the loggers built at init, which captured
+// text before the environment was resolved.
+func TestConfigureSwitchesToJSONFormat(t *testing.T) {
+	resetForTest(t)
+	dir := t.TempDir()
+	t.Setenv("LOG_FORMAT", "") // what a package-level logger sees with no env
+
+	l := New("format", dir, "debug", false)
+	l.Info("text-line")
+
+	t.Setenv("LOG_FORMAT", "json")
+	Configure(dir, "debug", false)
+	l.Info("json-line")
+
+	got := readLog(t, dir, "format")
+	if !strings.Contains(got, "[format] INFO") {
+		t.Fatalf("pre-configure line is not text: %q", got)
+	}
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	var rec map[string]string
+	last := lines[len(lines)-1]
+	if err := json.Unmarshal([]byte(last), &rec); err != nil {
+		t.Fatalf("post-configure line is not JSON: %q (%v)", last, err)
+	}
+	if rec["logger"] != "format" || rec["msg"] != "json-line" || rec["level"] != "info" {
+		t.Fatalf("unexpected JSON record: %v", rec)
+	}
+}
+
+// (i) A logger created after Configure follows it instead of keeping the
+// arguments its New call passed in.
+func TestLoggerCreatedAfterConfigureHonoursConfig(t *testing.T) {
+	resetForTest(t)
+	configured, stale := t.TempDir(), t.TempDir()
+	_, stderr := captureStderr(t)
+
+	Configure(configured, "error", false)
+
+	// Pre-config arguments say: ./stale, debug, verbose. The recorded
+	// configuration says otherwise on all three.
+	l := New("late", stale, "debug", true)
+	l.Info("late-info")
+	l.Error("late-error")
+
+	got := readLog(t, configured, "late")
+	if !strings.Contains(got, "late-error") {
+		t.Fatalf("logger created after Configure did not follow it: %q", got)
+	}
+	if strings.Contains(got, "late-info") {
+		t.Fatalf("configured level not applied to a late logger: %q", got)
+	}
+	if old := readLog(t, stale, "late"); old != "" {
+		t.Fatalf("late logger kept writing to its New directory: %q", old)
+	}
+	if out := stderr(); strings.Contains(out, "late-error") {
+		t.Fatalf("verbose from the New arguments leaked to stderr: %q", out)
+	}
+}
+
+// (j) Repeated Configure with identical arguments must not reopen the file:
+// O_APPEND would keep the content, so the file identity and the lines are what
+// prove nothing was swapped underneath a writer.
+func TestRepeatedConfigureIsANoOp(t *testing.T) {
+	resetForTest(t)
+	first, second := t.TempDir(), t.TempDir()
+
+	l := New("idem", first, "debug", false)
+	l.Info("line-one")
+	Configure(second, "debug", false)
+	l.Info("line-two")
+
+	path := filepath.Join(second, "idem.log")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		Configure(second, "debug", false)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatalf("repeated Configure replaced the log file")
+	}
+
+	l.Info("line-three")
+	got := readLog(t, second, "idem")
+	for _, want := range []string{"line-two", "line-three"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("line lost across repeated Configure: %q", got)
+		}
+	}
+	if n := strings.Count(got, "line-two"); n != 1 {
+		t.Fatalf("line-two appears %d times: %q", n, got)
+	}
+	if old := readLog(t, first, "idem"); strings.Contains(old, "line-three") {
+		t.Fatalf("line-three reached the previous directory: %q", old)
 	}
 }
