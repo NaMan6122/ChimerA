@@ -66,6 +66,16 @@ func main() {
 		return
 	}
 
+	// `chimera init` writes the machine-wide settings file; `chimera config`
+	// reports what this binary resolved and why. Neither starts a server.
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		runInit(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "config" {
+		runConfig(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
 		fmt.Printf("chimera %s\n", version)
 		return
@@ -99,6 +109,8 @@ func main() {
 	if !upHandled && len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
 		fmt.Fprintln(os.Stderr, "  gateway:  chimera                       (no arguments; serves :8000)")
+		fmt.Fprintln(os.Stderr, "  setup:    chimera init                  (machine-wide settings, once)")
+		fmt.Fprintln(os.Stderr, "            chimera config                (what it resolved, and why)")
 		fmt.Fprintln(os.Stderr, "  backends: chimera up [provider|all]     (first free port in 8000-8011)")
 		fmt.Fprintln(os.Stderr, "            chimera-kimi, chimera-gpt, …  (same thing, one word)")
 		fmt.Fprintln(os.Stderr, "  auth:     chimera auth login|status|check")

@@ -45,10 +45,20 @@ type Recorder struct {
 	warned  bool
 }
 
-// DefaultSessionsDir is $CHIMERA_SESSIONS_DIR, else ~/.local/share/chimera/sessions.
+// DefaultSessionsDir is $CHIMERA_SESSIONS_DIR, else <CHIMERA_HOME>/sessions,
+// else ~/.local/share/chimera/sessions.
+//
+// CHIMERA_HOME is read here rather than imported from internal/config: config
+// imports this package, so the variable is duplicated deliberately. Without it a
+// relocated install would keep its sessions in the default location while its
+// sessions' auth_data and logs moved, which is exactly the split this is meant to
+// remove.
 func DefaultSessionsDir() string {
 	if v := strings.TrimSpace(os.Getenv("CHIMERA_SESSIONS_DIR")); v != "" {
 		return v
+	}
+	if v := strings.TrimSpace(os.Getenv("CHIMERA_HOME")); v != "" {
+		return filepath.Join(v, "sessions")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
