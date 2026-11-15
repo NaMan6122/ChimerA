@@ -84,15 +84,18 @@ func TestWritePlanCreatesAndProtects(t *testing.T) {
 func TestTokenForNeverRotatesAWorkingCredential(t *testing.T) {
 	existing := map[string]string{"API_TOKEN": "already-here"}
 
-	if got, gen := tokenFor("", existing); got != "already-here" || gen {
-		t.Errorf("tokenFor(re-run) = %q generated=%v, want the existing token", got, gen)
+	if got, src := tokenFor("", existing); got != "already-here" || src != "kept" {
+		t.Errorf("tokenFor(re-run) = %q source=%q, want the existing token", got, src)
 	}
-	if got, gen := tokenFor("typed", existing); got != "typed" || gen {
-		t.Errorf("tokenFor(explicit) = %q generated=%v", got, gen)
+	// A token the operator passed is reported as theirs, not as a generated one
+	// to be printed back: printing a typed secret adds nothing and copies it
+	// into the terminal's scrollback.
+	if got, src := tokenFor("typed", existing); got != "typed" || src != "flag" {
+		t.Errorf("tokenFor(explicit) = %q source=%q", got, src)
 	}
-	got, gen := tokenFor("", map[string]string{})
-	if !gen || len(got) < 32 {
-		t.Errorf("tokenFor(fresh) = %q generated=%v, want a minted token", got, gen)
+	got, src := tokenFor("", map[string]string{})
+	if src != "generated" || len(got) < 32 {
+		t.Errorf("tokenFor(fresh) = %q source=%q, want a minted token", got, src)
 	}
 	if again, _ := tokenFor("", map[string]string{}); again == got {
 		t.Error("two minted tokens were identical")

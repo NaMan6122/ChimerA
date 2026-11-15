@@ -48,12 +48,14 @@ Next step after init: chimera auth login <provider>, then chimera up.
 // initPlan is what init decided, before anything touches the disk. Kept separate
 // so the decisions can be tested without a filesystem or a terminal.
 type initPlan struct {
-	Provider  string
-	Token     string
-	Port      int
-	Home      string
-	EnvPath   string
-	Generated bool // the token was minted here, so it must be printed once
+	Provider string
+	Token    string
+	Port     int
+	Home     string
+	EnvPath  string
+	// TokenSource is "generated", "kept" or "flag": only a generated token has
+	// to be printed, because it is the only copy that has not been seen.
+	TokenSource string
 }
 
 // runInit handles `chimera init`.
@@ -105,19 +107,19 @@ func runInit(args []string) {
 		chosen = askProvider()
 	}
 
-	keyToken, generated := tokenFor(*token, existing)
+	keyToken, tokenSource := tokenFor(*token, existing)
 	p := *port
 	if p == 0 {
 		p = 8000
 	}
 
 	plan := initPlan{
-		Provider:  chosen,
-		Token:     keyToken,
-		Port:      p,
-		Home:      home,
-		EnvPath:   envPath,
-		Generated: generated,
+		Provider:    chosen,
+		Token:       keyToken,
+		Port:        p,
+		Home:        home,
+		EnvPath:     envPath,
+		TokenSource: tokenSource,
 	}
 	if err := writePlan(plan); err != nil {
 		fmt.Fprintln(os.Stderr, "init:", err)
@@ -127,10 +129,13 @@ func runInit(args []string) {
 	fmt.Printf("Wrote %s\n\n", plan.EnvPath)
 	fmt.Printf("  provider  %s\n", plan.Provider)
 	fmt.Printf("  listen    127.0.0.1:%d\n", plan.Port)
-	if plan.Generated {
+	switch plan.TokenSource {
+	case "generated":
 		// Printed once: the file is 0600 and is the only other copy.
 		fmt.Printf("  api token %s   (generated — pass this as your API key)\n", plan.Token)
-	} else {
+	case "flag":
+		fmt.Printf("  api token set from -token\n")
+	default:
 		fmt.Printf("  api token kept (see the file)\n")
 	}
 	fmt.Printf("\nNext:\n")
@@ -145,14 +150,14 @@ func runInit(args []string) {
 // is already in the file is kept, because silently rotating a working credential
 // would break every client pointed at this gateway; only a fresh install mints a
 // new one.
-func tokenFor(explicit string, existing map[string]string) (token string, generated bool) {
+func tokenFor(explicit string, existing map[string]string) (token, source string) {
 	if t := strings.TrimSpace(explicit); t != "" {
-		return t, false
+		return t, "flag"
 	}
 	if t := strings.TrimSpace(existing["API_TOKEN"]); t != "" {
-		return t, false
+		return t, "kept"
 	}
-	return newToken(), true
+	return newToken(), "generated"
 }
 
 // initPromptable reports whether there is a terminal to ask a question on.
