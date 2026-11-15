@@ -8,18 +8,42 @@ services:
       - "8000:8000"   # OpenAI-compatible API
       - "6080:6080"   # noVNC (browser UI for login)
       - "5900:5900"   # VNC
+
     volumes:
+      # Exported web-api sessions live here; auth login writes them whatever
+      # transport is in use. A stale file does not change how this service
+      # serves — see the TRANSPORT pin below.
       - ./auth_data:/app/auth_data
       - ./browser_data:/app/browser_data
       - ./logs:/app/logs
       - ./.env:/app/.env
     environment:
       - PROVIDER=${PROVIDER:-chatgpt}
-      - TRANSPORT=${TRANSPORT:-auto}
+      # This file is the headful path: it publishes noVNC and VNC so a human can
+      # log in, and runs Chromium against a persistent profile. Pinning the
+      # transport stops a session file in ./auth_data from moving serving to
+      # the browserless path, which would leave the window people are told to
+      # log in through doing nothing. Override with auto or webapi when this
+      # container is meant to be a backend instead.
+      - TRANSPORT=${TRANSPORT:-dom}
       - API_TOKEN=${API_TOKEN:-chimera}
       - API_PORT=8000
       - HEADLESS=false
       - VNC_PASSWORD=${VNC_PASSWORD:-}
+      # State paths are set explicitly instead of relying on the compiled
+      # defaults: those default to <CHIMERA_HOME>, i.e. ~/.local/share/chimera
+      # inside the container, which is the container layer - a rebuild would
+      # lose the profile and every provider login. These point at the mounts
+      # above. Compose environment beats /app/.env, so an old .env cannot
+      # move state off the host.
+      - BROWSER_DATA_DIR=/app/browser_data
+      - AUTH_DIR=/app/auth_data
+      - LOG_DIR=/app/logs
+      - METER_DB=/app/logs/usage.db
+      # Transcripts: the gateway reads SESSIONS_DIR, the CLI reads
+      # CHIMERA_SESSIONS_DIR; they are kept equal here under the logs mount.
+      - SESSIONS_DIR=/app/logs/sessions
+      - CHIMERA_SESSIONS_DIR=/app/logs/sessions
     restart: unless-stopped
     shm_size: 2gb
 

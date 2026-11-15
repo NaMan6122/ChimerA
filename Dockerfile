@@ -28,11 +28,21 @@ COPY --from=builder --chown=65532:65532 /out/logs /app/logs
 COPY --from=builder /out/bin/ /usr/local/bin/
 COPY .env.example /app/.env.example
 
+# This stage has no entrypoint to default them (distroless ships no shell), so
+# the state paths are stated here: the binary's own defaults are <CHIMERA_HOME>,
+# which inside a container is the writable layer — a `docker compose down` would
+# take the exported sessions with it.
 ENV TRANSPORT=webapi \
     API_HOST=0.0.0.0 \
-    API_PORT=8000
+    API_PORT=8000 \
+    BROWSER_DATA_DIR=/app/browser_data \
+    AUTH_DIR=/app/auth_data \
+    LOG_DIR=/app/logs \
+    METER_DB=/app/logs/usage.db \
+    SESSIONS_DIR=/app/logs/sessions \
+    CHIMERA_SESSIONS_DIR=/app/logs/sessions
 
-VOLUME ["/app/auth_data", "/app/logs"]
+VOLUME ["/app/browser_data", "/app/auth_data", "/app/logs"]
 
 EXPOSE 8000
 
@@ -73,7 +83,20 @@ COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /app/auth_data /app/browser_data /app/logs && chmod 0700 /app/auth_data
 
-VOLUME ["/app/auth_data", "/app/browser_data", "/app/logs"]
+# State lives under /app so it lands on the volumes declared below. The binary's
+# own defaults are <CHIMERA_HOME> (~/.local/share/chimera), which in a container
+# is the writable layer: `docker compose down` would take the logins with it.
+# Compose sets the same values on the service, so neither side depends on the
+# other; supervisord reads LOG_DIR through %(ENV_LOG_DIR)s.
+ENV BROWSER_DATA_DIR=/app/browser_data \
+    AUTH_DIR=/app/auth_data \
+    LOG_DIR=/app/logs \
+    METER_DB=/app/logs/usage.db \
+    SESSIONS_DIR=/app/logs/sessions \
+    CHIMERA_SESSIONS_DIR=/app/logs/sessions
+
+# Browser data + auth sessions + logs
+VOLUME ["/app/browser_data", "/app/auth_data", "/app/logs"]
 
 EXPOSE 8000 5900 6080
 
