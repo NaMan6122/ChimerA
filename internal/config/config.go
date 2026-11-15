@@ -189,10 +189,19 @@ func (s *Sources) Of(key string) string {
 	if s.process[key] {
 		return "environment"
 	}
-	if _, ok := s.cwdEnv[key]; ok {
+	// An empty value in a file is reported as such: for most keys it means "not
+	// set" (the compiled default applies), and claiming the file as the winner
+	// would misdescribe what the process is doing.
+	if v, ok := s.cwdEnv[key]; ok {
+		if strings.TrimSpace(v) == "" {
+			return s.cwdPath + " (empty)"
+		}
 		return s.cwdPath
 	}
-	if _, ok := s.homeEnv[key]; ok {
+	if v, ok := s.homeEnv[key]; ok {
+		if strings.TrimSpace(v) == "" {
+			return s.homePath + " (empty)"
+		}
 		return s.homePath
 	}
 	if s.legacy[key] {
@@ -219,13 +228,20 @@ func (s *Sources) dir(name, sub string) string {
 	}
 	home := filepath.Join(HomeDir(), sub)
 	legacy := "./" + sub
-	if _, err := os.Stat(legacy); err == nil {
-		if _, herr := os.Stat(home); herr != nil {
-			s.legacy[name] = true
-			return legacy
-		}
+	// Only a directory counts on either side: a regular file named ./auth_data
+	// would otherwise be selected and then fail EnsureDirs with "not a
+	// directory", while `chimera config` reported it as a healthy setting.
+	if isDir(legacy) && !isDir(home) {
+		s.legacy[name] = true
+		return legacy
 	}
 	return home
+}
+
+// isDir reports whether path exists and is a directory.
+func isDir(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
 }
 
 // loadEnvFiles reads ./.env and <HomeDir()>/env, recording which file supplied
@@ -234,12 +250,11 @@ func (s *Sources) dir(name, sub string) string {
 // first gives it the tie-break over the machine-wide one.
 func loadEnvFiles() *Sources {
 	s := &Sources{
-		process:  map[string]bool{},
-		cwdEnv:   map[string]string{},
-		homeEnv:  map[string]string{},
-		legacy:   map[string]bool{},
-		cwdPath:  ".env",
-		homePath: filepath.Join(HomeDir(), "env"),
+		process: map[string]bool{},
+		cwdEnv:  map[string]string{},
+		homeEnv: map[string]string{},
+		legacy:  map[string]bool{},
+		cwdPath: ".env",
 	}
 	for _, kv := range os.Environ() {
 		k, v, ok := strings.Cut(kv, "=")
@@ -260,9 +275,6 @@ func loadEnvFiles() *Sources {
 	if m, err := godotenv.Read(s.cwdPath); err == nil {
 		s.cwdEnv = m
 	}
-	if m, err := godotenv.Read(s.homePath); err == nil {
-		s.homeEnv = m
-	}
 
 	// A file never overrides something already set, so the project file is
 	// applied first: it beats the machine-wide one, and both lose to the
@@ -274,9 +286,28 @@ func loadEnvFiles() *Sources {
 			applied[k] = true
 		}
 	}
+
+	// The machine-wide file is located only now: CHIMERA_HOME may itself have
+	// come from ./.env, and reading the old home's file next to state resolved
+	// under the new one would misreport both the file and the value.
+	s.homePath = filepath.Join(HomeDir(), "env")
+	if m, err := godotenv.Read(s.homePath); err == nil {
+		s.homeEnv = m
+	}
 	for k, v := range s.homeEnv {
 		if !s.process[k] && !applied[k] {
 			setFromFile(k, v)
+			applied[k] = true
+		}
+	}
+
+	// Values this process set from a file that no longer supplies them would
+	// otherwise persist invisibly: after a key is removed from the file, a second
+	// load would still resolve the deleted value while reporting "default".
+	for k := range fileValues {
+		if !applied[k] {
+			_ = os.Unsetenv(k)
+			delete(fileValues, k)
 		}
 	}
 	return s

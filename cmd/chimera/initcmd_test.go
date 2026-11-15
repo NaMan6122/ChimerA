@@ -153,6 +153,125 @@ func TestReadEnvMapIgnoresCommentsAndSpacing(t *testing.T) {
 	}
 }
 
+// TestPortFromKeepsTheRunningPort: -force regenerates the file, it does not move
+// the gateway off the port clients already point at.
+func TestPortFromKeepsTheRunningPort(t *testing.T) {
+	existing := map[string]string{"API_PORT": "8010"}
+	if got := portFrom(existing, 0); got != 8010 {
+		t.Errorf("portFrom(no flag) = %d, want the existing 8010", got)
+	}
+	if got := portFrom(existing, 8020); got != 8020 {
+		t.Errorf("portFrom(flag) = %d, want the flag's 8020", got)
+	}
+	for _, bad := range []string{"", "not-a-port", "0", "99999"} {
+		if got := portFrom(map[string]string{"API_PORT": bad}, 0); got != 8000 {
+			t.Errorf("portFrom(%q) = %d, want the 8000 default", bad, got)
+		}
+	}
+}
+
+// TestExtraBodyPreservesUnmanagedSettings is the -force safety net: dropping
+// API_TOKENS would reopen a gateway that was authenticated, and dropping a quota
+// would lift a limit somebody set deliberately.
+func TestExtraBodyPreservesUnmanagedSettings(t *testing.T) {
+	if got := extraBody(nil); got != "" {
+		t.Errorf("extraBody(nil) = %q, want nothing", got)
+	}
+	body := extraBody(map[string]string{
+		"API_TOKENS":             "acme=a1",
+		"DEEPSEEK_WEB_MODEL":     "deepseek-reasoner",
+		"QUOTA_MONTHLY_REQUESTS": "500",
+	})
+	for _, want := range []string{"API_TOKENS=acme=a1", "DEEPSEEK_WEB_MODEL=deepseek-reasoner", "QUOTA_MONTHLY_REQUESTS=500", "does not manage"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("preserved block missing %q:\n%s", want, body)
+		}
+	}
+	// Sorted, so two rewrites of the same file produce the same bytes.
+	if strings.Index(body, "API_TOKENS") > strings.Index(body, "DEEPSEEK_WEB_MODEL") {
+		t.Error("preserved keys are not sorted")
+	}
+}
+
+// TestAdoptLegacyStateCopiesWorkingDirectory: writing absolute home paths ends
+// the legacy fallback, so init must carry the sessions across or an upgrade
+// silently loses them. Copies, never moves: a gateway may still be running.
+func TestAdoptLegacyStateCopiesWorkingDirectory(t *testing.T) {
+	home := t.TempDir()
+	work := t.TempDir()
+	t.Chdir(work)
+
+	if err := os.MkdirAll("./auth_data", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("./auth_data/deepseek.json", []byte(`{"token":"t"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := "./browser_data/deepseek/Default/Local Storage"
+	if err := os.MkdirAll(profile, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profile, "state.log"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("./browser_data/deepseek/DevToolsActivePort", []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	adopted := adoptLegacyState(initPlan{Home: home, Provider: "deepseek"})
+	if len(adopted) != 2 {
+		t.Fatalf("adopted = %v, want a session and a profile", adopted)
+	}
+
+	dst := filepath.Join(home, "auth_data", "deepseek.json")
+	if raw, err := os.ReadFile(dst); err != nil || string(raw) != `{"token":"t"}` {
+		t.Fatalf("session not copied: %v", err)
+	}
+	if fi, err := os.Stat(dst); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("copied session mode = %v, want 0600", fi.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(home, "browser_data", "deepseek", "Default", "Local Storage", "state.log")); err != nil {
+		t.Errorf("profile not copied: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "browser_data", "deepseek", "DevToolsActivePort")); err == nil {
+		t.Error("stale DevToolsActivePort travelled with the profile")
+	}
+	// The source is left alone: the old install keeps working.
+	if _, err := os.Stat("./auth_data/deepseek.json"); err != nil {
+		t.Errorf("source session was removed: %v", err)
+	}
+
+	// Re-running adopts nothing twice and does not overwrite what is there.
+	if got := adoptLegacyState(initPlan{Home: home, Provider: "deepseek"}); len(got) != 0 {
+		t.Errorf("second adopt = %v, want nothing", got)
+	}
+}
+
+// TestWritePlanTightensAnExistingFile: os.WriteFile keeps the mode of a file that
+// already exists, so a world-readable settings file would stay world-readable
+// while holding a token.
+func TestWritePlanTightensAnExistingFile(t *testing.T) {
+	home := t.TempDir()
+	plan := initPlan{Home: home, EnvPath: filepath.Join(home, "env"),
+		Provider: "deepseek", Token: "tok", Port: 8000}
+	if err := os.WriteFile(plan.EnvPath, []byte("OLD=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(plan.EnvPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(plan.EnvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, want 0600", fi.Mode().Perm())
+	}
+}
+
 // TestProviderListCoversEveryServableProvider: init must not offer "all", which
 // is a routing mode rather than something auth can log in to.
 func TestProviderListCoversEveryServableProvider(t *testing.T) {

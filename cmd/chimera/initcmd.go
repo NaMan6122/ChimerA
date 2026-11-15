@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/term"
@@ -56,6 +57,18 @@ type initPlan struct {
 	// TokenSource is "generated", "kept" or "flag": only a generated token has
 	// to be printed, because it is the only copy that has not been seen.
 	TokenSource string
+	// Extra carries settings this command does not own (API_TOKENS, quotas,
+	// model selectors) so a rewrite cannot silently drop them. Losing API_TOKENS
+	// on a -force would reopen a gateway that was authenticated.
+	Extra map[string]string
+}
+
+// managedKeys are the settings init writes itself. Everything else in an
+// existing file is preserved verbatim on a rewrite.
+var managedKeys = map[string]bool{
+	"PROVIDER": true, "TRANSPORT": true, "API_HOST": true, "API_PORT": true,
+	"API_TOKEN": true, "AUTH_DIR": true, "BROWSER_DATA_DIR": true,
+	"LOG_DIR": true, "LOG_LEVEL": true, "METER_DB": true,
 }
 
 // runInit handles `chimera init`.
@@ -108,9 +121,12 @@ func runInit(args []string) {
 	}
 
 	keyToken, tokenSource := tokenFor(*token, existing)
-	p := *port
-	if p == 0 {
-		p = 8000
+	p := portFrom(existing, *port)
+	extra := map[string]string{}
+	for k, v := range existing {
+		if !managedKeys[strings.ToUpper(k)] {
+			extra[k] = v
+		}
 	}
 
 	plan := initPlan{
@@ -120,6 +136,7 @@ func runInit(args []string) {
 		Home:        home,
 		EnvPath:     envPath,
 		TokenSource: tokenSource,
+		Extra:       extra,
 	}
 	if err := writePlan(plan); err != nil {
 		fmt.Fprintln(os.Stderr, "init:", err)
@@ -143,7 +160,29 @@ func runInit(args []string) {
 	fmt.Printf("  chimera up                # start every provider with a session\n")
 	fmt.Printf("  chimera-chat              # no -model flag: it asks the gateway\n")
 
+	adopted := adoptLegacyState(plan)
+	if len(adopted) > 0 {
+		fmt.Printf("\nAdopted from this directory (copies — nothing was moved):\n")
+		for _, line := range adopted {
+			fmt.Printf("  %s\n", line)
+		}
+	}
 	noteLegacyState()
+}
+
+// portFrom resolves the listen port: the flag wins, then the port the install
+// already uses, then 8000. A rewrite is about regenerating the file, not about
+// moving the gateway.
+func portFrom(existing map[string]string, flagPort int) int {
+	if flagPort > 0 {
+		return flagPort
+	}
+	if v := strings.TrimSpace(existing["API_PORT"]); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n < 65536 {
+			return n
+		}
+	}
+	return 8000
 }
 
 // tokenFor decides the API token. An explicit one wins; otherwise a token that
@@ -184,7 +223,117 @@ func writePlan(p initPlan) error {
 	if err := os.WriteFile(p.EnvPath, []byte(body), 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", p.EnvPath, err)
 	}
+	// WriteFile keeps the mode of a file that already exists, so a settings file
+	// that was world-readable before -force would stay that way while holding a
+	// token. Tighten it explicitly.
+	if err := os.Chmod(p.EnvPath, 0o600); err != nil {
+		return fmt.Errorf("securing %s: %w", p.EnvPath, err)
+	}
 	return nil
+}
+
+// adoptLegacyState copies an existing cwd install into the machine-wide layout.
+//
+// Writing absolute AUTH_DIR/BROWSER_DATA_DIR paths is exactly what ends the
+// "legacy cwd" fallback, so init would otherwise be the command that leaves a
+// working install with no sessions: the next run would read empty home
+// directories. Copies, never moves — a gateway may still be running from the
+// old directory.
+func adoptLegacyState(p initPlan) []string {
+	var adopted []string
+
+	sessions, _ := filepath.Glob("./auth_data/*.json")
+	for _, src := range sessions {
+		dst := filepath.Join(p.Home, "auth_data", filepath.Base(src))
+		if src == dst || fileExists(dst) {
+			continue
+		}
+		raw, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		// Create the target directory here rather than relying on writePlan
+		// having run: adoption must not depend on the order of the two steps.
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			continue
+		}
+		if err := os.WriteFile(dst, raw, 0o600); err != nil {
+			continue
+		}
+		_ = os.Chmod(dst, 0o600)
+		adopted = append(adopted, "session  "+filepath.Base(src))
+	}
+
+	if entries, err := os.ReadDir("./browser_data"); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			dst := filepath.Join(p.Home, "browser_data", e.Name())
+			if fileExists(dst) {
+				continue
+			}
+			if err := copyTree(filepath.Join("./browser_data", e.Name()), dst); err != nil {
+				continue
+			}
+			// Stale single-instance files stop Chromium from starting.
+			for _, stale := range []string{"DevToolsActivePort", "SingletonLock", "SingletonSocket", "SingletonCookie"} {
+				_ = os.Remove(filepath.Join(dst, stale))
+			}
+			adopted = append(adopted, "profile  browser_data/"+e.Name())
+		}
+	}
+
+	// The usage ledger may be held open by a running gateway (WAL), so its
+	// companions travel with it or the copy would be inconsistent.
+	if fileExists("./logs/usage.db") && !fileExists(filepath.Join(p.Home, "usage.db")) {
+		if err := copyFile("./logs/usage.db", filepath.Join(p.Home, "usage.db")); err == nil {
+			for _, suffix := range []string{"-wal", "-shm"} {
+				if fileExists("./logs/usage.db" + suffix) {
+					_ = copyFile("./logs/usage.db"+suffix, filepath.Join(p.Home, "usage.db"+suffix))
+				}
+			}
+			adopted = append(adopted, "ledger   logs/usage.db")
+		}
+	}
+	return adopted
+}
+
+func copyFile(src, dst string) error {
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, raw, 0o600)
+}
+
+// copyTree copies a directory of regular files (a Chromium profile has no
+// symlinks worth preserving).
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(src, path)
+		if rerr != nil {
+			return rerr
+		}
+		target := filepath.Join(dst, rel)
+		if fi.IsDir() {
+			return os.MkdirAll(target, fi.Mode().Perm())
+		}
+		if !fi.Mode().IsRegular() {
+			return nil
+		}
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		return os.WriteFile(target, raw, fi.Mode().Perm())
+	})
 }
 
 // envFileBody is the settings file: absolute paths, so the file means the same
@@ -211,7 +360,29 @@ LOG_DIR=%s
 LOG_LEVEL=info
 METER_DB=%s
 `, p.Provider, p.Port, p.Token,
-		abs("auth_data"), abs("browser_data"), abs("logs"), filepath.Join(p.Home, "usage.db"))
+		abs("auth_data"), abs("browser_data"), abs("logs"), filepath.Join(p.Home, "usage.db")) +
+		extraBody(p.Extra)
+}
+
+// extraBody appends settings init does not own — tenant tokens, quotas, model
+// selectors — so a rewrite preserves them instead of quietly reverting an
+// authenticated gateway to an open one.
+func extraBody(extra map[string]string) string {
+	if len(extra) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteString("\n# Preserved from the previous settings file (init does not manage these).\n")
+	for _, k := range keys {
+		fmt.Fprintf(&b, "%s=%s\n", k, extra[k])
+	}
+	return b.String()
 }
 
 // providerWithSession names the provider that already has an exported session,

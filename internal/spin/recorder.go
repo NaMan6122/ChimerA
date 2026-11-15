@@ -54,8 +54,14 @@ type Recorder struct {
 // sessions' auth_data and logs moved, which is exactly the split this is meant to
 // remove.
 func DefaultSessionsDir() string {
-	if v := strings.TrimSpace(os.Getenv("CHIMERA_SESSIONS_DIR")); v != "" {
-		return v
+	// Both names are read: CHIMERA_SESSIONS_DIR is the harness's own override,
+	// SESSIONS_DIR is what the gateway's settings file uses, and a directory that
+	// only one of them honours would put the gateway's transcripts and the TUI's
+	// in different places.
+	for _, key := range []string{"CHIMERA_SESSIONS_DIR", "SESSIONS_DIR"} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
 	}
 	if v := strings.TrimSpace(os.Getenv("CHIMERA_HOME")); v != "" {
 		return filepath.Join(v, "sessions")

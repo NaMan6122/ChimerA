@@ -95,6 +95,63 @@ func TestConfigShowsSources(t *testing.T) {
 	}
 }
 
+// TestTenantTokensAreNotDescribedAsOpen is the report bug: with API_TOKENS set,
+// auth is required, and claiming "requests accepted without auth" would send an
+// operator hunting a problem that does not exist.
+func TestTenantTokensAreNotDescribedAsOpen(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.APIToken = ""
+	cfg.APITokens = "acme=a1,basic=b2"
+
+	out := renderConfig(cfg, nil)
+	if strings.Contains(out, "requests accepted without auth") {
+		t.Fatalf("a tenant-authenticated gateway was described as open:\n%s", out)
+	}
+	for _, want := range []string{"2 tenant(s)", "acme", "basic"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+	// The tokens themselves are never printed.
+	if strings.Contains(out, "a1") || strings.Contains(out, "b2") {
+		t.Errorf("a tenant token leaked:\n%s", out)
+	}
+}
+
+// TestTenantNamesParsing covers the API_TOKENS shapes people write.
+func TestTenantNamesParsing(t *testing.T) {
+	cases := map[string][]string{
+		"":                      nil,
+		"acme=a1":               {"acme"},
+		"acme=a1,basic=b2":      {"acme", "basic"},
+		" acme = a1 , basic=b2": {"acme", "basic"},
+		"malformed":             nil,
+	}
+	for in, want := range cases {
+		got := tenantNames(in)
+		if len(got) != len(want) {
+			t.Errorf("tenantNames(%q) = %v, want %v", in, got, want)
+			continue
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("tenantNames(%q) = %v, want %v", in, got, want)
+				break
+			}
+		}
+	}
+}
+
+// TestQuotaText keeps an unlimited quota from looking like a number.
+func TestQuotaText(t *testing.T) {
+	if got := quotaText(0); got != "unlimited" {
+		t.Errorf("quotaText(0) = %q", got)
+	}
+	if got := quotaText(500); got != "500 requests" {
+		t.Errorf("quotaText(500) = %q", got)
+	}
+}
+
 // TestRedact covers the three states a token can be in.
 func TestRedact(t *testing.T) {
 	if got := redact(""); !strings.Contains(got, "unset") {

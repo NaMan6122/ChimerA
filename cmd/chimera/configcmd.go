@@ -140,21 +140,75 @@ func resolveSettings(cfg *config.Config, src *config.Sources) []setting {
 	settings := []setting{
 		{Key: "provider", Value: cfg.Provider, Source: from("PROVIDER")},
 		{Key: "transport", Value: cfg.Transport, Source: from("TRANSPORT")},
-		{Key: "listen", Value: fmt.Sprintf("%s:%s", cfg.APIHost, port), Source: joinSources(from("API_HOST"), from("API_PORT"))},
-		{Key: "api token", Value: cfg.APIToken, Source: from("API_TOKEN"), Secret: true},
-		{Key: "auth dir", Value: cfg.AuthDir, Source: from("AUTH_DIR")},
-		{Key: "browser dir", Value: cfg.BrowserDataDir, Source: from("BROWSER_DATA_DIR")},
-		{Key: "log dir", Value: cfg.LogDir, Source: from("LOG_DIR")},
-		{Key: "log level", Value: cfg.LogLevel, Source: from("LOG_LEVEL")},
-		{Key: "verbose", Value: fmt.Sprintf("%t", cfg.Verbose), Source: from("VERBOSE")},
-		{Key: "usage ledger", Value: cfg.MeterDB, Source: from("METER_DB")},
-		{Key: "sessions dir", Value: cfg.SessionsDir, Source: from("SESSIONS_DIR")},
-		{Key: "chimera home", Value: config.HomeDir(), Source: from("CHIMERA_HOME")},
 	}
+	if cfg.TransportFallback != "" {
+		settings = append(settings, setting{Key: "fallback", Value: cfg.TransportFallback, Source: from("TRANSPORT_FALLBACK")})
+	}
+	settings = append(settings,
+		setting{Key: "listen", Value: fmt.Sprintf("%s:%s", cfg.APIHost, port), Source: joinSources(from("API_HOST"), from("API_PORT"))},
+	)
+	// A gateway with tenant tokens requires auth, so describing it as open would
+	// send an operator looking for a problem that does not exist — or worse, hide
+	// one that does.
+	if tenants := tenantNames(cfg.APITokens); len(tenants) > 0 {
+		settings = append(settings, setting{
+			Key:    "api tokens",
+			Value:  fmt.Sprintf("%d tenant(s): %s", len(tenants), strings.Join(tenants, ", ")),
+			Source: from("API_TOKENS"),
+		})
+	} else {
+		settings = append(settings, setting{Key: "api token", Value: cfg.APIToken, Source: from("API_TOKEN"), Secret: true})
+	}
+	settings = append(settings,
+		setting{Key: "auth dir", Value: cfg.AuthDir, Source: from("AUTH_DIR")},
+		setting{Key: "browser dir", Value: cfg.BrowserDataDir, Source: from("BROWSER_DATA_DIR")},
+		setting{Key: "log dir", Value: cfg.LogDir, Source: from("LOG_DIR")},
+		setting{Key: "log level", Value: cfg.LogLevel, Source: from("LOG_LEVEL")},
+		setting{Key: "verbose", Value: fmt.Sprintf("%t", cfg.Verbose), Source: from("VERBOSE")},
+		setting{Key: "usage ledger", Value: cfg.MeterDB, Source: from("METER_DB")},
+		setting{Key: "sessions dir", Value: cfg.SessionsDir, Source: sessionsSource(from)},
+		setting{Key: "quota / month", Value: quotaText(cfg.QuotaMonthlyRequests), Source: from("QUOTA_MONTHLY_REQUESTS")},
+		setting{Key: "max prompt", Value: fmt.Sprintf("%d chars", cfg.MaxPromptChars), Source: from("MAX_PROMPT_CHARS")},
+		setting{Key: "chimera home", Value: config.HomeDir(), Source: from("CHIMERA_HOME")},
+	)
 	if m := webModel(cfg); m != "" {
 		settings = append(settings, setting{Key: "web model", Value: m, Source: from(modelKey(cfg.Provider))})
 	}
 	return settings
+}
+
+// tenantNames lists the tenant names in an API_TOKENS value ("acme=a1,basic=b2").
+// Names are reported, secrets never: the tokens are what must stay private.
+func tenantNames(spec string) []string {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil
+	}
+	var names []string
+	for _, pair := range strings.Split(spec, ",") {
+		name, _, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		if ok && strings.TrimSpace(name) != "" {
+			names = append(names, strings.TrimSpace(name))
+		}
+	}
+	return names
+}
+
+// sessionsSource names the variable that actually decided the sessions dir: the
+// harness's own override wins over the gateway's SESSIONS_DIR, and both are
+// consulted from the environment.
+func sessionsSource(from func(string) string) string {
+	if s := from("CHIMERA_SESSIONS_DIR"); s != "default" {
+		return s
+	}
+	return from("SESSIONS_DIR")
+}
+
+func quotaText(n int) string {
+	if n <= 0 {
+		return "unlimited"
+	}
+	return fmt.Sprintf("%d requests", n)
 }
 
 // webModel is the browserless model selector for the configured provider, if it
