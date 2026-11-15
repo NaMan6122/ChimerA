@@ -20,10 +20,10 @@ services:
     environment:
       - PROVIDER=${PROVIDER:-chatgpt}
       # This file is the headful path: it publishes noVNC and VNC so a human can
-      # log in, and runs Chromium against a persistent profile. Pinning the
-      # transport stops a session file in ./auth_data from moving serving to
-      # the browserless path, which would leave the window people are told to
-      # log in through doing nothing. Override with auto or webapi when this
+      # log in, and it runs Chromium with a persistent profile. Pin the
+      # transport so a session file left in ./auth_data cannot quietly move
+      # serving to the browserless path and leave the window people are told to
+      # use doing nothing. Override with TRANSPORT=auto or webapi when the
       # container is meant to be a backend instead.
       - TRANSPORT=${TRANSPORT:-dom}
       - API_TOKEN=${API_TOKEN:-chimera}
