@@ -42,12 +42,13 @@ type welcomeModel struct {
 	token   string
 }
 
-// welcomeScanMsg carries the result of an r-triggered rescan. keep is the
-// provider to re-select if it is still live, so a rescan does not move the
-// cursor under the user's fingers.
+// welcomeScanMsg carries the result of an r-triggered rescan. keep/keepBase
+// identify the row that was selected, so a rescan does not move the cursor under
+// the user's fingers.
 type welcomeScanMsg struct {
-	list []backend
-	keep string
+	list     []backend
+	keep     string
+	keepBase string
 }
 
 func (m *welcomeModel) Init() tea.Cmd { return brandAnimation() }
@@ -63,16 +64,14 @@ func (m *welcomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, brandAnimation()
 
 	case welcomeScanMsg:
+		hadNone := len(m.live()) == 0
 		m.list, m.scanning = msg.list, false
 		live := m.live()
-		m.index = 0
-		for i, b := range live {
-			if strings.EqualFold(b.Provider, msg.keep) {
-				m.index = i
-			}
-		}
-		// A rescan that finds exactly one gateway has answered the question.
-		if len(live) == 1 {
+		m.index = indexOf(live, msg.keep, msg.keepBase)
+		// A cold start that now finds exactly one gateway has answered the
+		// question for the user. A rescan of an already-populated list must not:
+		// one press of r would otherwise open a backend they never chose.
+		if hadNone && len(live) == 1 {
 			m.chosen = &live[0]
 			return m, tea.Quit
 		}
@@ -138,26 +137,40 @@ func (m *welcomeModel) View() string {
 
 	// One gateway is the only option, so it needs no choosing — but showing it
 	// confirms what the scan found before the chat opens.
-	mark := "  "
-	if len(live) > 1 {
-		mark = "▸ "
-	}
+	choosing := len(live) > 1
 	for i, bk := range live {
 		cursor := "  "
-		style := lipgloss.NewStyle()
-		if len(live) > 1 && i == m.index {
-			cursor = mark
-			style = style.Bold(true).Foreground(lipgloss.Color("214"))
+		if choosing && i == m.index {
+			cursor = "▸ "
 		}
-		fmt.Fprintf(&b, "  %s%-10s %-28s %s\n",
-			cursor,
-			style.Render(bk.Provider),
-			lipgloss.NewStyle().Faint(true).Render(bk.BaseURL),
-			bk.Model)
+		// Pad before styling: escape codes count as columns, so a styled string
+		// run through %-10s would not line up with the row above it.
+		name := fmt.Sprintf("%-10s", orGateway(bk.Provider))
+		addr := fmt.Sprintf("%-28s", bk.BaseURL)
+		what := bk.Model
+		if what == "" {
+			what = bk.Note
+		}
+		if choosing && i == m.index {
+			name = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(name)
+			addr = lipgloss.NewStyle().Faint(true).Render(addr)
+		} else {
+			addr = lipgloss.NewStyle().Faint(true).Render(addr)
+		}
+		fmt.Fprintf(&b, "  %s%s %s %s\n", cursor, name, addr, what)
 	}
 	b.WriteString("\n")
-	b.WriteString(m.hintView(len(live) > 1))
+	b.WriteString(m.hintView(choosing))
 	return b.String()
+}
+
+// orGateway names a backend whose provider is unknown — a gateway that answered
+// but would not say what it serves.
+func orGateway(provider string) string {
+	if provider == "" {
+		return "gateway"
+	}
+	return provider
 }
 
 // emptyView explains an empty scan with the commands that fill it.
@@ -195,20 +208,47 @@ func (m *welcomeModel) live() []backend {
 
 func (m *welcomeModel) rescan() tea.Cmd {
 	m.scanning = true
-	keep := ""
+	keep, keepBase := "", ""
 	if live := m.live(); len(live) > 0 && m.index < len(live) {
-		keep = live[m.index].Provider
+		keep, keepBase = live[m.index].Provider, live[m.index].BaseURL
 	}
 	base, ports, token := m.baseURL, m.ports, m.token
 	return func() tea.Msg {
-		return welcomeScanMsg{list: scan(defaultProbeClient(), probeTargets(base, ports), token), keep: keep}
+		return welcomeScanMsg{
+			list:     scan(defaultProbeClient(), probeTargets(base, ports), token),
+			keep:     keep,
+			keepBase: keepBase,
+		}
 	}
+}
+
+// indexOf finds the row to select: by address first (the identity that cannot
+// collide), then by provider, else the first row.
+func indexOf(list []backend, provider, base string) int {
+	if base != "" {
+		for i, b := range list {
+			if canonicalKey(b.BaseURL) == canonicalKey(base) {
+				return i
+			}
+		}
+	}
+	if provider != "" {
+		for i, b := range list {
+			if strings.EqualFold(b.Provider, provider) {
+				return i
+			}
+		}
+	}
+	return 0
 }
 
 // chooseBackend runs the welcome screen and returns the gateway the user
 // opened. A quit returns errNoBackendChosen so the caller can exit quietly.
 func chooseBackend(list []backend, baseURL string, ports []int, token string) (backend, error) {
 	m := &welcomeModel{list: list, baseURL: baseURL, ports: ports, token: token}
+	// Start on the gateway the session already pointed at, not on whichever
+	// provider sorts first: the highlight is the default answer.
+	m.index = indexOf(m.live(), "", baseURL)
 	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
 		return backend{}, err

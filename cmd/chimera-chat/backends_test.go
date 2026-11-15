@@ -10,13 +10,44 @@ import (
 )
 
 func fakeGateway(model string) *httptest.Server {
+	return fakeGatewayIDs(model)
+}
+
+// fakeGatewayIDs serves the two paths probe() asks, the way a real gateway
+// answers them: /health is the open liveness path, /models carries owned_by.
+func fakeGatewayIDs(ids ...string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/models" {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("OK"))
+		case "/models":
+			w.Header().Set("Content-Type", "application/json")
+			var parts []string
+			for _, id := range ids {
+				parts = append(parts, fmt.Sprintf(`{"id":%q,"object":"model","owned_by":%q}`,
+					id, strings.TrimPrefix(id, "chimera-")))
+			}
+			fmt.Fprintf(w, `{"object":"list","data":[%s]}`, strings.Join(parts, ","))
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"object":"list","data":[{"id":%q,"object":"model"}]}`, model)
+	}))
+}
+
+// fakeBusyGateway is alive but rate limited on the model list — the state a
+// gateway is in right after any other request touched it.
+func fakeBusyGateway() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("OK"))
+		case "/models":
+			w.WriteHeader(http.StatusTooManyRequests)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 }
 
@@ -79,7 +110,7 @@ func TestResolveStartupAdoptsGatewayModel(t *testing.T) {
 	defer deep.Close()
 	list := scan(defaultProbeClient(), []string{deep.URL, "http://127.0.0.1:1/v1"}, "t")
 
-	b, needChoice, err := resolveStartup(list, "")
+	b, needChoice, err := resolveStartup(list, "", "")
 	if err != nil {
 		t.Fatalf("resolveStartup: %v", err)
 	}
@@ -102,12 +133,12 @@ func TestResolveStartupAsksWhenAmbiguous(t *testing.T) {
 	defer b.Close()
 	list := scan(defaultProbeClient(), []string{a.URL, b.URL}, "t")
 
-	if _, needChoice, err := resolveStartup(list, ""); err != nil || !needChoice {
+	if _, needChoice, err := resolveStartup(list, "", ""); err != nil || !needChoice {
 		t.Fatalf("needChoice = %v, err = %v; want a choice and no error", needChoice, err)
 	}
 
 	// Naming one of them answers the question, so no picker is needed.
-	got, needChoice, err := resolveStartup(list, "chimera-deepseek")
+	got, needChoice, err := resolveStartup(list, "chimera-deepseek", "")
 	if err != nil || needChoice {
 		t.Fatalf("explicit model: needChoice = %v, err = %v", needChoice, err)
 	}
@@ -116,8 +147,143 @@ func TestResolveStartupAsksWhenAmbiguous(t *testing.T) {
 	}
 
 	// The bare provider name is accepted too: `-model deepseek` reads naturally.
-	if got, _, _ := resolveStartup(list, "deepseek"); got.Provider != "deepseek" {
+	if got, _, _ := resolveStartup(list, "deepseek", ""); got.Provider != "deepseek" {
 		t.Fatalf("-model deepseek chose %q", got.Provider)
+	}
+}
+
+// TestExplicitBaseBeatsAmbiguity is the silent-wrong-gateway blocker: with two
+// gateways up, the address the user named decides, and it decides the same way
+// whether it is spelled localhost or 127.0.0.1.
+func TestExplicitBaseBeatsAmbiguity(t *testing.T) {
+	chat := fakeGateway("chimera-chatgpt")
+	defer chat.Close()
+	deep := fakeGateway("chimera-deepseek")
+	defer deep.Close()
+	list := scan(defaultProbeClient(), []string{chat.URL, deep.URL}, "t")
+
+	for _, base := range []string{deep.URL, strings.Replace(deep.URL, "127.0.0.1", "localhost", 1)} {
+		b, needChoice, err := resolveStartup(list, "", base)
+		if err != nil || needChoice {
+			t.Fatalf("resolveStartup(%q): needChoice = %v, err = %v", base, needChoice, err)
+		}
+		if b.Provider != "deepseek" {
+			t.Fatalf("resolveStartup(%q) chose %q, want deepseek", base, b.Provider)
+		}
+	}
+
+	// An address that is down says nothing about intent: fall back to the picker.
+	if _, needChoice, err := resolveStartup(list, "", "http://localhost:9999/v1"); err != nil || !needChoice {
+		t.Fatalf("dead explicit base: needChoice = %v, err = %v", needChoice, err)
+	}
+
+	// An address and a model that contradict each other are named, not resolved:
+	// silently dropping either would talk to something the user did not ask for.
+	_, _, err := resolveStartup(list, "chimera-kimi", deep.URL)
+	if err == nil || !strings.Contains(err.Error(), "chimera-deepseek") {
+		t.Fatalf("contradictory model/address should list what the address serves, got: %v", err)
+	}
+}
+
+// TestProbeTargetsDedupeLocalhostSpellings: one gateway must not appear twice,
+// or the picker asks the user to choose between a row and its own reflection.
+func TestProbeTargetsDedupeLocalhostSpellings(t *testing.T) {
+	got := probeTargets("http://127.0.0.1:8010/v1", []int{8010, 8011})
+	if len(got) != 2 {
+		t.Fatalf("probeTargets = %v, want 2 entries (8010 deduped, 8011 added)", got)
+	}
+	if !strings.Contains(got[0], "8010") {
+		t.Fatalf("the named address should be first: %v", got)
+	}
+	for _, u := range got {
+		if _, err := url.Parse(u); err != nil {
+			t.Fatalf("probeTargets produced an unparseable address %q: %v", u, err)
+		}
+	}
+}
+
+// TestNormalizeBase covers the shapes people actually type.
+func TestNormalizeBase(t *testing.T) {
+	cases := map[string]string{
+		"127.0.0.1:8010":            "http://127.0.0.1:8010/v1",
+		"http://localhost:8010":     "http://localhost:8010/v1",
+		"http://localhost:8010/v1/": "http://localhost:8010/v1",
+		"http://localhost:8010/v1":  "http://localhost:8010/v1",
+		"":                          "",
+	}
+	for in, want := range cases {
+		if got := normalizeBase(in); got != want {
+			t.Errorf("normalizeBase(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// localhost and 127.0.0.1 are one gateway, whatever the spelling.
+	if canonicalKey("http://127.0.0.1:8010/v1") != canonicalKey("localhost:8010") {
+		t.Error("localhost and 127.0.0.1 did not collapse to one identity")
+	}
+}
+
+// TestProbeKeepsBusyGatewayVisible is the blocker that made a live gateway look
+// missing: /v1/models is behind the rate limiter, so a 429 there must not be
+// read as "nothing is listening" and must not hand the session to another
+// provider.
+func TestProbeKeepsBusyGatewayVisible(t *testing.T) {
+	busy := fakeBusyGateway()
+	defer busy.Close()
+	chat := fakeGateway("chimera-chatgpt")
+	defer chat.Close()
+
+	list := scan(defaultProbeClient(), []string{busy.URL, chat.URL}, "t")
+	var got *backend
+	for i := range list {
+		if list[i].BaseURL == busy.URL {
+			got = &list[i]
+		}
+	}
+	if got == nil || !got.Up {
+		t.Fatalf("busy gateway reported down: %+v", list)
+	}
+	if !strings.Contains(got.Note, "429") {
+		t.Fatalf("note should name the rate limit, got %q", got.Note)
+	}
+
+	// And the choice the user made still wins over the gateways that answered.
+	b, _, err := resolveStartup(list, "", busy.URL)
+	if err != nil {
+		t.Fatalf("resolveStartup: %v", err)
+	}
+	if canonicalKey(b.BaseURL) != canonicalKey(busy.URL) {
+		t.Fatalf("opened %s instead of the busy gateway", b.BaseURL)
+	}
+}
+
+// TestPooledGatewayServesEveryProvider: PROVIDER=all lists one model per
+// provider, so -model must match any id, not just the first.
+func TestPooledGatewayServesEveryProvider(t *testing.T) {
+	pool := fakeGatewayIDs("chimera-chatgpt", "chimera-deepseek")
+	defer pool.Close()
+	list := scan(defaultProbeClient(), []string{pool.URL}, "t")
+	if len(list) != 1 || len(list[0].Models) != 2 {
+		t.Fatalf("pooled model list not captured: %+v", list)
+	}
+
+	for _, want := range []string{"chimera-deepseek", "deepseek", "chimera-chatgpt"} {
+		if _, _, err := resolveStartup(list, want, ""); err != nil {
+			t.Errorf("resolveStartup(%q): %v", want, err)
+		}
+	}
+	if _, _, err := resolveStartup(list, "chimera-kimi", ""); err == nil {
+		t.Error("expected an error for an id the pool does not serve")
+	}
+}
+
+// TestProviderComesFromOwnedBy: the gateway states the owner, which survives a
+// pooled listing; the chimera- prefix convention is only the fallback.
+func TestProviderComesFromOwnedBy(t *testing.T) {
+	if got := providerFor("some-custom-id", "deepseek"); got != "deepseek" {
+		t.Errorf("providerFor = %q, want deepseek", got)
+	}
+	if got := providerFor("chimera-qwen", ""); got != "qwen" {
+		t.Errorf("providerFor fallback = %q, want qwen", got)
 	}
 }
 
@@ -129,7 +295,7 @@ func TestResolveStartupRejectsAbsentModel(t *testing.T) {
 	defer deep.Close()
 	list := scan(defaultProbeClient(), []string{deep.URL}, "t")
 
-	_, _, err := resolveStartup(list, "chimera-kimi")
+	_, _, err := resolveStartup(list, "chimera-kimi", "")
 	if err == nil {
 		t.Fatal("expected an error for a model no live gateway serves")
 	}
@@ -141,16 +307,25 @@ func TestResolveStartupRejectsAbsentModel(t *testing.T) {
 // TestResolveStartupExplainsEmptyScan pins the remedy: a missing gateway is a
 // startup problem, and the message must name the command that starts one.
 func TestResolveStartupExplainsEmptyScan(t *testing.T) {
-	_, _, err := resolveStartup([]backend{{BaseURL: "http://localhost:8010/v1", Err: "no gateway"}}, "")
+	_, _, err := resolveStartup([]backend{{BaseURL: "http://localhost:8010/v1", Err: "no gateway"}}, "", "")
 	if err == nil || !strings.Contains(err.Error(), "chimera up") {
 		t.Fatalf("error must name the start command, got: %v", err)
+	}
+}
+
+// TestNoGatewayErrorNamesRateLimit: a 429 on a server without /health is still
+// not "nothing is running", and the fix is to wait rather than to start another.
+func TestNoGatewayErrorNamesRateLimit(t *testing.T) {
+	_, _, err := resolveStartup([]backend{{BaseURL: "http://localhost:8000/v1", Err: "HTTP 429"}}, "", "")
+	if err == nil || !strings.Contains(err.Error(), "rate limiting") {
+		t.Fatalf("error should name the rate limit, got: %v", err)
 	}
 }
 
 // TestResolveStartupNamesTokenMismatch: a 401 is a token problem, not a missing
 // gateway, and pointing at the wrong fix wastes the user's time.
 func TestResolveStartupNamesTokenMismatch(t *testing.T) {
-	_, _, err := resolveStartup([]backend{{BaseURL: "http://localhost:8000/v1", Err: "HTTP 401"}}, "")
+	_, _, err := resolveStartup([]backend{{BaseURL: "http://localhost:8000/v1", Err: "HTTP 401"}}, "", "")
 	if err == nil || !strings.Contains(err.Error(), "token") {
 		t.Fatalf("error should mention the token, got: %v", err)
 	}

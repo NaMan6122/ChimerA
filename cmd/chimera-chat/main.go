@@ -156,6 +156,16 @@ func main() {
 	flag.BoolVar(&listBackends, "list-backends", false, "probe local gateways, print what answers, and exit")
 	flag.Parse()
 
+	// Was -base-url typed, or is it the default? An address the user named is
+	// intent and must beat the picker; the default must not, or every launch
+	// with two gateways up would silently prefer :8000.
+	baseURLSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "base-url" {
+			baseURLSet = true
+		}
+	})
+
 	if showVersion {
 		fmt.Println("chimera-chat " + version)
 		return
@@ -183,13 +193,17 @@ func main() {
 	// One scan is reused for the picker, for the fallback, and for the wording
 	// of a failure — re-probing per branch would triple the startup cost.
 	list := scan(defaultProbeClient(), probeTargets(baseURL, probePorts), token)
-	b, needChoice, err := resolveStartup(list, modelID)
+	wantBase := ""
+	if baseURLSet {
+		wantBase = baseURL
+	}
+	b, needChoice, err := resolveStartup(list, modelID, wantBase)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	if needChoice {
-		if !isTTY(os.Stdin) {
+		if !hasTerminal() {
 			// Nobody to ask: take the deterministic pick so the message below
 			// names a concrete backend instead of stalling on a keypress.
 			b, _ = preferred(list, baseURL)
@@ -206,14 +220,22 @@ func main() {
 	}
 	baseURL, modelID = b.BaseURL, b.Model
 
-	// The TUI needs a terminal. Piped or redirected stdin has no keypresses to
-	// read, so bubbletea would sit on the pipe forever; refusing with the
-	// resolved backend is more use than a hang, and one line shows the headless
+	// The TUI needs a terminal: without a controlling one there are no keys to
+	// read and bubbletea would wait on them forever. Refusing with the resolved
+	// backend is more use than a hang, and one line shows the headless
 	// equivalent for whoever meant to script this.
-	if !isTTY(os.Stdin) {
+	if !hasTerminal() {
+		name := b.Provider
+		if name == "" {
+			name = "gateway"
+		}
+		model := modelID
+		if model == "" {
+			model = "whatever it serves"
+		}
 		fmt.Fprintf(os.Stderr, "chimera-chat needs a terminal — would open %s on %s (model %s)\n",
-			b.Provider, b.BaseURL, modelID)
-		fmt.Fprintf(os.Stderr, "  headless: chimera-spin -base-url %s -model %s \"<task>\"\n", baseURL, modelID)
+			name, baseURL, model)
+		fmt.Fprintf(os.Stderr, "  headless: chimera-spin -base-url %s \"<task>\"\n", baseURL)
 		os.Exit(2)
 	}
 
@@ -227,11 +249,16 @@ func main() {
 	}
 
 	client := spin.NewClient(baseURL, token, modelID, session)
-	// Still checked: discovery and this request are separate round trips, so a
-	// gateway restarted onto another provider in between must not look healthy.
-	if err := client.CheckModel(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	// Discovery can end with a gateway that was listening but rate limited its
+	// model list (a 429 from the limiter), so the model is still unknown here.
+	// Ask once more rather than refusing to start; CheckModel is deliberately
+	// not called — it would be a second request for an answer we just used.
+	if modelID == "" {
+		if err := client.AdoptModel(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		modelID = client.Model
 	}
 	client.Refresh()
 
@@ -899,6 +926,22 @@ func short(id string) string {
 // arrive — the difference between a prompt and a hang.
 func isTTY(f *os.File) bool {
 	return term.IsTerminal(int(f.Fd()))
+}
+
+// hasTerminal reports whether keys can be read at all. bubbletea reopens
+// /dev/tty when stdin is a redirect, so `chimera-chat </dev/null` inside a
+// terminal still works and must not be refused; what it cannot survive is having
+// no controlling terminal at all, which is the case this guards.
+func hasTerminal() bool {
+	if isTTY(os.Stdin) || isTTY(os.Stdout) {
+		return true
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	tty.Close()
+	return true
 }
 
 func envOr(k, def string) string {

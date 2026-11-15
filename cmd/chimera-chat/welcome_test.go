@@ -164,8 +164,8 @@ func TestWelcomeRescanKeepsSelection(t *testing.T) {
 	}
 }
 
-// TestWelcomeRescanSingleBackendOpens: a rescan that finds exactly one gateway
-// has answered the question, so the chooser gets out of the way.
+// TestWelcomeRescanSingleBackendOpens: a cold start whose rescan finds exactly
+// one gateway has answered the question, so the chooser gets out of the way.
 func TestWelcomeRescanSingleBackendOpens(t *testing.T) {
 	m := newWelcome()
 	m.Update(welcomeScanMsg{list: []backend{
@@ -173,5 +173,58 @@ func TestWelcomeRescanSingleBackendOpens(t *testing.T) {
 	}})
 	if m.chosen == nil || m.chosen.Provider != "deepseek" {
 		t.Fatalf("rescan to a single gateway chose %+v", m.chosen)
+	}
+}
+
+// TestWelcomeRescanDoesNotAutoSelectWhenPopulated is the other half of that
+// rule: once gateways are listed, a rescan that happens to return one must not
+// open it unprompted — a 429 or a slow port could otherwise decide for the user.
+func TestWelcomeRescanDoesNotAutoSelectWhenPopulated(t *testing.T) {
+	m := newWelcome(
+		backend{Provider: "chatgpt", BaseURL: "http://localhost:8000/v1", Model: "chimera-chatgpt", Up: true},
+		backend{Provider: "deepseek", BaseURL: "http://localhost:8010/v1", Model: "chimera-deepseek", Up: true},
+	)
+	m.Update(welcomeScanMsg{list: []backend{
+		{Provider: "deepseek", BaseURL: "http://localhost:8010/v1", Model: "chimera-deepseek", Up: true},
+	}})
+	if m.chosen != nil {
+		t.Fatalf("rescan opened %+v without a choice", m.chosen)
+	}
+	if len(m.live()) != 1 || m.index != 0 {
+		t.Fatalf("rescan left the list at %d rows, cursor %d", len(m.live()), m.index)
+	}
+}
+
+// TestCursorSeedsFromBaseAddress: the highlight is the default answer, so it
+// follows the address the session pointed at — under any spelling of localhost.
+func TestCursorSeedsFromBaseAddress(t *testing.T) {
+	list := []backend{
+		{Provider: "chatgpt", BaseURL: "http://localhost:8000/v1", Model: "chimera-chatgpt", Up: true},
+		{Provider: "deepseek", BaseURL: "http://localhost:8010/v1", Model: "chimera-deepseek", Up: true},
+	}
+	for _, base := range []string{"http://localhost:8010/v1", "http://127.0.0.1:8010/v1", "127.0.0.1:8010"} {
+		if got := indexOf(list, "", base); got != 1 {
+			t.Errorf("indexOf(%q) = %d, want 1 (deepseek)", base, got)
+		}
+	}
+	// An address nothing answered falls back to the first row.
+	if got := indexOf(list, "", "http://localhost:9999/v1"); got != 0 {
+		t.Errorf("indexOf(unmatched) = %d, want 0", got)
+	}
+}
+
+// TestWelcomeShowsBusyGateway renders the state probe() now reports: alive, with
+// no model yet, and a reason instead of an empty column.
+func TestWelcomeShowsBusyGateway(t *testing.T) {
+	m := newWelcome(backend{
+		BaseURL: "http://localhost:8010/v1",
+		Up:      true,
+		Note:    "busy (HTTP 429): the gateway rate-limits model discovery",
+	})
+	view := stripANSI(m.View())
+	for _, want := range []string{"gateway", "429"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("busy row missing %q:\n%s", want, view)
+		}
 	}
 }
