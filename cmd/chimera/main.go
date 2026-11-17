@@ -37,6 +37,12 @@ import (
 	"github.com/go-rod/rod"
 )
 
+// log_ is built before the config exists, so its arguments are only
+// pre-Configure defaults. logging.Configure (called right after config.Load)
+// re-points this logger and every other one created at init - api, browser,
+// pool, session - at cfg.LogDir/cfg.LogLevel/cfg.Verbose, so LOG_DIR,
+// LOG_LEVEL and VERBOSE are honoured without threading a *config.Config into
+// packages that do not have one.
 var log_ = logging.New("main", "./logs", "debug", true)
 
 // version is stamped at install time with -ldflags "-X main.version=...".
@@ -57,6 +63,23 @@ func main() {
 	// `chimera doctor ...` checks the local install; it is not the server.
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		runDoctor(os.Args[2:])
+		return
+	}
+
+	// `chimera init` writes the machine-wide settings file; `chimera config`
+	// reports what this binary resolved and why. Neither starts a server.
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		runInit(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "config" {
+		runConfig(os.Args[2:])
+		return
+	}
+
+	// `chimera smoke` proves the chain end to end: health, models, one answer.
+	if len(os.Args) > 1 && os.Args[1] == "smoke" {
+		runSmoke(os.Args[2:])
 		return
 	}
 
@@ -93,6 +116,9 @@ func main() {
 	if !upHandled && len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
 		fmt.Fprintln(os.Stderr, "  gateway:  chimera                       (no arguments; serves :8000)")
+		fmt.Fprintln(os.Stderr, "  setup:    chimera init                  (machine-wide settings, once)")
+		fmt.Fprintln(os.Stderr, "            chimera config                (what it resolved, and why)")
+		fmt.Fprintln(os.Stderr, "            chimera smoke                 (health, models, one real answer)")
 		fmt.Fprintln(os.Stderr, "  backends: chimera up [provider|all]     (first free port in 8000-8011)")
 		fmt.Fprintln(os.Stderr, "            chimera-kimi, chimera-gpt, …  (same thing, one word)")
 		fmt.Fprintln(os.Stderr, "  auth:     chimera auth login|status|check")
@@ -132,6 +158,13 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	// The config is now authoritative for logging: without this the
+	// package-level loggers keep logging debug to ./logs whatever the
+	// environment says. Same call serves the HTTP and the MCP path.
+	logging.Configure(cfg.LogDir, cfg.LogLevel, cfg.Verbose)
+
+	// Transport is part of what is worth logging, and a pooled gateway has no
+	// single provider URL to print.
 	log_.Infof("Chimera starting (provider=%s, transport=%s, port=%d)", cfg.Provider, cfg.Transport, cfg.APIPort)
 	if !cfg.IsPooled() {
 		log_.Infof("Provider URL: %s", cfg.ProviderURL())

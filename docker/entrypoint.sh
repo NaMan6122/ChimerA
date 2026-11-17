@@ -7,11 +7,22 @@ set -e
 
 echo "[entrypoint] Chimera starting (provider=${PROVIDER:-chatgpt})"
 
-mkdir -p /app/browser_data /app/logs /tmp
+# State dirs and their compiled-default counterparts (see the Dockerfile ENV
+# block). Defaults here keep `docker run` working without compose, and the
+# export is what supervisord expands as %(ENV_LOG_DIR)s.
+: "${BROWSER_DATA_DIR:=/app/browser_data}"
+: "${AUTH_DIR:=/app/auth_data}"
+: "${LOG_DIR:=/app/logs}"
+export BROWSER_DATA_DIR AUTH_DIR LOG_DIR
+
+mkdir -p "$BROWSER_DATA_DIR" "$LOG_DIR" /tmp
+# Sessions are password-equivalent; 0700 matches what the binary asks for.
+# -m only affects directories this creates, so a bind mount keeps its own mode.
+mkdir -p -m 700 "$AUTH_DIR"
 
 # Clean stale lock files from previous crash
 for p in SingletonLock SingletonSocket SingletonCookie; do
-  find /app/browser_data -name "$p" -delete 2>/dev/null || true
+  find "$BROWSER_DATA_DIR" -name "$p" -delete 2>/dev/null || true
 done
 
 # DNS pre-resolve for Chrome's built-in resolver (fixes DNS_PROBE_FINISHED_NXDOMAIN in Docker)

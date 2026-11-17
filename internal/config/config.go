@@ -154,27 +154,215 @@ type Config struct {
 	MaxPromptChars int
 }
 
+// HomeDir is where a machine-wide install keeps its state: $CHIMERA_HOME, else
+// ~/.local/share/chimera — the root the harness already uses for transcripts, so
+// one directory holds everything a Chimera install owns.
+func HomeDir() string {
+	if v := strings.TrimSpace(os.Getenv("CHIMERA_HOME")); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	return filepath.Join(home, ".local", "share", "chimera")
+}
+
+// Sources records where each setting came from. `chimera config` prints it so
+// "why is it doing that" has an answer that does not require reading the code.
+type Sources struct {
+	process map[string]bool   // present in the environment before any file was read
+	cwdEnv  map[string]string // ./.env
+	homeEnv map[string]string // <HomeDir()>/env
+	legacy  map[string]bool   // a cwd directory the resolved default fell back to
+
+	cwdPath  string
+	homePath string
+}
+
+// Of names the winner for one key: the process environment, the project file,
+// the machine-wide file, or a compiled default.
+func (s *Sources) Of(key string) string {
+	if s == nil {
+		return "default"
+	}
+	if s.process[key] {
+		return "environment"
+	}
+	// An empty value in a file is reported as such: for most keys it means "not
+	// set" (the compiled default applies), and claiming the file as the winner
+	// would misdescribe what the process is doing.
+	if v, ok := s.cwdEnv[key]; ok {
+		if strings.TrimSpace(v) == "" {
+			return s.cwdPath + " (empty)"
+		}
+		return s.cwdPath
+	}
+	if v, ok := s.homeEnv[key]; ok {
+		if strings.TrimSpace(v) == "" {
+			return s.homePath + " (empty)"
+		}
+		return s.homePath
+	}
+	if s.legacy[key] {
+		return "legacy cwd"
+	}
+	return "default"
+}
+
+// EnvFiles lists the two files consulted, for `chimera config`.
+func (s *Sources) EnvFiles() (cwd, home string) {
+	if s == nil {
+		return ".env", ""
+	}
+	return s.cwdPath, s.homePath
+}
+
+// dir resolves a directory setting. An explicit value wins. Otherwise the
+// historical cwd directory is kept when it is the one already in use and the
+// machine-wide one does not exist yet, so an existing install does not appear to
+// lose its sessions after an upgrade. Everything else lives under HomeDir.
+func (s *Sources) dir(name, sub string) string {
+	if v, ok := os.LookupEnv(name); ok && strings.TrimSpace(v) != "" {
+		return v
+	}
+	home := filepath.Join(HomeDir(), sub)
+	legacy := "./" + sub
+	// Only a directory counts on either side: a regular file named ./auth_data
+	// would otherwise be selected and then fail EnsureDirs with "not a
+	// directory", while `chimera config` reported it as a healthy setting.
+	if isDir(legacy) && !isDir(home) {
+		s.legacy[name] = true
+		return legacy
+	}
+	return home
+}
+
+// isDir reports whether path exists and is a directory.
+func isDir(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+// loadEnvFiles reads ./.env and <HomeDir()>/env, recording which file supplied
+// what. Precedence is process environment > ./.env > <HomeDir()>/env > defaults:
+// godotenv does not overwrite an existing variable, so reading the project file
+// first gives it the tie-break over the machine-wide one.
+func loadEnvFiles() *Sources {
+	s := &Sources{
+		process: map[string]bool{},
+		cwdEnv:  map[string]string{},
+		homeEnv: map[string]string{},
+		legacy:  map[string]bool{},
+		cwdPath: ".env",
+	}
+	for _, kv := range os.Environ() {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		// A value this process wrote itself is not an exported one: counting it
+		// would make provenance lie ("environment" for a file value) and would
+		// stop a later load from picking up an edit. Comparing the value, not
+		// just the key, keeps an export that came after the last load — even one
+		// that happens to follow a file.
+		if ours, ok := fileValues[k]; ok && ours == v {
+			continue
+		}
+		delete(fileValues, k)
+		s.process[k] = true
+	}
+	if m, err := godotenv.Read(s.cwdPath); err == nil {
+		s.cwdEnv = m
+	}
+
+	// A file never overrides something already set, so the project file is
+	// applied first: it beats the machine-wide one, and both lose to the
+	// process environment.
+	applied := map[string]bool{}
+	for k, v := range s.cwdEnv {
+		if !s.process[k] {
+			setFromFile(k, v)
+			applied[k] = true
+		}
+	}
+
+	// The machine-wide file is located only now: CHIMERA_HOME may itself have
+	// come from ./.env, and reading the old home's file next to state resolved
+	// under the new one would misreport both the file and the value.
+	s.homePath = filepath.Join(HomeDir(), "env")
+	if m, err := godotenv.Read(s.homePath); err == nil {
+		s.homeEnv = m
+	}
+	for k, v := range s.homeEnv {
+		if !s.process[k] && !applied[k] {
+			setFromFile(k, v)
+			applied[k] = true
+		}
+	}
+
+	// Values this process set from a file that no longer supplies them would
+	// otherwise persist invisibly: after a key is removed from the file, a second
+	// load would still resolve the deleted value while reporting "default".
+	for k := range fileValues {
+		if !applied[k] {
+			_ = os.Unsetenv(k)
+			delete(fileValues, k)
+		}
+	}
+	return s
+}
+
+// fileValues remembers the value this process copied out of a settings file, so
+// a later load can distinguish its own copy from a genuine export. The CLI loads
+// once, but doctor, --mcp and the tests load more than once in one process, and
+// a file edit has to be visible on the next load.
+var fileValues = map[string]string{}
+
+// setFromFile copies one file value into the environment and remembers it.
+func setFromFile(k, v string) {
+	_ = os.Setenv(k, v)
+	fileValues[k] = v
+}
+
 // Load creates a Config from environment variables, with .env file support.
 func Load() (*Config, error) {
-	// Load .env from cwd first
-	if err := godotenv.Load(); err != nil {
-		// .env is optional
-		_ = err
-	}
+	cfg, _, err := LoadWithSources()
+	return cfg, err
+}
+
+// LoadWithSources is Load plus the provenance of every setting, for
+// `chimera config`. Both files and the environment are consulted in one place so
+// the gateway, the CLI and the reported answer cannot disagree.
+func LoadWithSources() (*Config, *Sources, error) {
+	return load(false)
+}
+
+// LoadReadOnly resolves the configuration without creating anything on disk.
+// Inspection commands use it: `chimera config` is what someone runs when the
+// install is misbehaving, and it must work on a read-only or full filesystem,
+// and leave no trace when it does.
+func LoadReadOnly() (*Config, *Sources, error) {
+	return load(true)
+}
+
+// load builds the configuration. readOnly skips EnsureDirs.
+func load(readOnly bool) (*Config, *Sources, error) {
+	src := loadEnvFiles()
 
 	cfg := &Config{
 		// Provider
 		Provider: getEnvStr("PROVIDER", ProviderChatGPT),
 
 		// Browser
-		BrowserDataDir: getEnvStr("BROWSER_DATA_DIR", "./browser_data"),
+		BrowserDataDir: src.dir("BROWSER_DATA_DIR", "browser_data"),
 		Headless:       getEnvBool("HEADLESS", false),
 		SlowMo:         time.Duration(getEnvInt("SLOW_MO", 0)) * time.Millisecond,
 
 		// Transport + auth sessions
 		Transport:         getEnvStr("TRANSPORT", TransportAuto),
 		TransportFallback: getEnvStr("TRANSPORT_FALLBACK", ""),
-		AuthDir:           getEnvStr("AUTH_DIR", "./auth_data"),
+		AuthDir:           src.dir("AUTH_DIR", "auth_data"),
 
 		// WebAPI models
 		QwenWebModel:    getEnvStr("QWEN_WEB_MODEL", "qwen3.8-max"),
@@ -215,7 +403,7 @@ func Load() (*Config, error) {
 		ThinkingPauseMax: time.Duration(getEnvInt("THINKING_PAUSE_MAX", 1500)) * time.Millisecond,
 
 		// Logging
-		LogDir:   getEnvStr("LOG_DIR", "./logs"),
+		LogDir:   src.dir("LOG_DIR", "logs"),
 		LogLevel: getEnvStr("LOG_LEVEL", "debug"),
 		Verbose:  getEnvBool("VERBOSE", true),
 
@@ -241,8 +429,10 @@ func Load() (*Config, error) {
 	}
 
 	// Ensure directories exist
-	if err := cfg.EnsureDirs(); err != nil {
-		return nil, fmt.Errorf("creating directories: %w", err)
+	if !readOnly {
+		if err := cfg.EnsureDirs(); err != nil {
+			return nil, src, fmt.Errorf("creating directories: %w", err)
+		}
 	}
 
 	// Metering defaults: on, under the log dir. Explicitly empty METER_DB disables.
@@ -263,7 +453,7 @@ func Load() (*Config, error) {
 	// Parse credentials now so bad API_TOKENS fails fast instead of opening the gateway.
 	keys, err := auth.New(cfg.APIToken, cfg.APITokens)
 	if err != nil {
-		return nil, fmt.Errorf("parsing API tokens: %w", err)
+		return nil, src, fmt.Errorf("parsing API tokens: %w", err)
 	}
 	cfg.APIKeys = keys
 
@@ -271,13 +461,13 @@ func Load() (*Config, error) {
 	switch cfg.Transport {
 	case TransportDOM, TransportWebAPI, TransportAuto:
 	default:
-		return nil, fmt.Errorf("unsupported transport %q, supported: %s, %s, %s",
+		return nil, src, fmt.Errorf("unsupported transport %q, supported: %s, %s, %s",
 			cfg.Transport, TransportDOM, TransportWebAPI, TransportAuto)
 	}
 	switch cfg.TransportFallback {
 	case "", TransportDOM:
 	default:
-		return nil, fmt.Errorf("unsupported transport fallback %q, supported: %q (or empty)",
+		return nil, src, fmt.Errorf("unsupported transport fallback %q, supported: %q (or empty)",
 			cfg.TransportFallback, TransportDOM)
 	}
 
@@ -290,11 +480,11 @@ func Load() (*Config, error) {
 		}
 	}
 	if !valid {
-		return nil, fmt.Errorf("unsupported provider %q, supported: %s",
+		return nil, src, fmt.Errorf("unsupported provider %q, supported: %s",
 			cfg.Provider, strings.Join(SupportedProviders, ", "))
 	}
 
-	return cfg, nil
+	return cfg, src, nil
 }
 
 // ProviderURL returns the base URL for the configured provider.

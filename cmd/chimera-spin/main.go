@@ -35,7 +35,7 @@ func main() {
 	)
 	flag.StringVar(&baseURL, "base-url", envOr("CHIMERA_BASE_URL", "http://localhost:8000/v1"), "gateway base URL")
 	flag.StringVar(&token, "token", envOr("CHIMERA_API_KEY", "chimera"), "bearer token")
-	flag.StringVar(&model, "model", "chimera-chatgpt", "model id")
+	flag.StringVar(&model, "model", "", "model id (default: whatever the gateway serves)")
 	flag.StringVar(&models, "models", "", `comma-separated model ids to run the task once per model, in order (e.g. chimera-gemini,chimera-grok); overrides -model; one combined report on stdout`)
 	flag.StringVar(&session, "session", "", "session id (default: a fresh one per run)")
 	flag.StringVar(&root, "root", ".", "workspace root the tools are confined to")
@@ -112,6 +112,16 @@ func main() {
 
 	client := spin.NewClient(baseURL, token, model, session)
 	client.HTTP.Timeout = timeout
+	// Resolve the model before the recorder and the report capture it: the id
+	// belongs to the endpoint, so an unset -model is answered by the gateway
+	// rather than by a default that only suits one provider.
+	if err := client.AdoptModel(); err != nil {
+		fmt.Fprintln(os.Stderr, "spin:", err)
+		os.Exit(1)
+	}
+	model = client.Model
+	// Still checked: adoption and this request are separate round trips, so a
+	// gateway restarted onto another provider in between must not look healthy.
 	if err := client.CheckModel(); err != nil {
 		fmt.Fprintln(os.Stderr, "spin:", err)
 		os.Exit(1)

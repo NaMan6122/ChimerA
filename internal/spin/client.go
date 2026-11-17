@@ -166,39 +166,120 @@ func (c *Client) NewSession(id string) {
 	c.Turns = 0
 }
 
-// CheckModel asks what the gateway serves and fails before any work if the
-// requested model is absent. A gateway serves one provider at a time, so
-// asking a ChatGPT gateway for chimera-deepseek is a configuration error worth
-// naming precisely rather than a 400 mid-turn.
-func (c *Client) CheckModel() error {
+// Models asks the gateway what it serves. Every failure mode here has a
+// different fix, so each one names its own: an unreachable port is a gateway
+// that was never started, a 401 is the wrong token, a non-200 is the gateway
+// itself, and an empty list is a gateway with no provider session behind it.
+//
+// A 429 is retried rather than reported: the gateway rate-limits this path with
+// a burst of one, so whoever probed a moment earlier (a scan, a health poll, the
+// previous attempt) has already spent the token. Without the wait, an
+// "ask again once the bucket refills" caller would fail 100% of the time, since
+// it retries milliseconds later.
+func (c *Client) Models() ([]string, error) {
+	var lastErr error
+	for attempt, wait := range []time.Duration{0, 500 * time.Millisecond, 1500 * time.Millisecond, 3 * time.Second} {
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+		ids, retry, err := c.modelsOnce()
+		if err == nil {
+			return ids, nil
+		}
+		lastErr = err
+		if !retry || attempt == 3 {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// modelsOnce performs one model-list request, reporting whether a 429 makes a
+// retry worthwhile.
+func (c *Client) modelsOnce() (ids []string, retry bool, err error) {
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(c.BaseURL, "/")+"/models", nil)
 	if err != nil {
-		return nil
+		return nil, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil // unreachable: Complete reports it with a remedy
+		return nil, false, fmt.Errorf(`no gateway answered at %s
+  %v
+
+  start one:
+    chimera up deepseek      (or: chimera up - every provider with a session)
+  or point at a gateway that is already listening:
+    -base-url http://localhost:8010/v1`, c.BaseURL, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, false, fmt.Errorf(`the gateway at %s rejected the token
+  pass the one it was started with:  -token <token>`, c.BaseURL)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, true, fmt.Errorf(`the gateway at %s is rate limiting model discovery (HTTP 429)
+  retry in a moment, or pass -model explicitly`, c.BaseURL)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil
+		return nil, false, fmt.Errorf("gateway %s answered %d", c.BaseURL, resp.StatusCode)
 	}
 	var out struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if json.Unmarshal(raw, &out) != nil || len(out.Data) == 0 {
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, false, fmt.Errorf("decode %s/models: %w", c.BaseURL, err)
+	}
+	ids = make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, false, fmt.Errorf(`the gateway at %s serves no models
+  it is listening but has no provider behind it:  chimera auth login <provider>`, c.BaseURL)
+	}
+	return ids, false, nil
+}
+
+// AdoptModel takes the model id from the endpoint when the caller gave none. A
+// gateway serves one provider and therefore one model, so the id is a property
+// of the endpoint: demanding it as a flag turns a working setup into a flag
+// error the user has to look up. An explicit id is never overridden - that is
+// how a mismatch gets reported instead of silently corrected.
+func (c *Client) AdoptModel() error {
+	if c.Model != "" {
 		return nil
 	}
-	var names []string
-	for _, m := range out.Data {
-		if m.ID == c.Model {
+	ids, err := c.Models()
+	if err != nil {
+		return err
+	}
+	// A gateway serves one provider, so the first id is the whole answer.
+	c.Model = ids[0]
+	return nil
+}
+
+// CheckModel fails before any work if the gateway answered with a model list
+// that lacks the requested id. A gateway serves one provider at a time, so
+// asking a ChatGPT gateway for chimera-deepseek is a configuration error worth
+// naming precisely rather than a 400 mid-turn.
+//
+// Probe trouble is deliberately not an error: an unreachable port, a non-200 or
+// an empty list is reported by the first turn, which carries the remedy for it.
+func (c *Client) CheckModel() error {
+	ids, err := c.Models()
+	if err != nil {
+		return nil
+	}
+	for _, id := range ids {
+		if id == c.Model {
 			return nil
 		}
-		names = append(names, m.ID)
 	}
 	return fmt.Errorf(`%s does not serve %q
   available: %s
@@ -208,7 +289,7 @@ func (c *Client) CheckModel() error {
     TRANSPORT=webapi PROVIDER=deepseek API_PORT=8010 chimera
     -base-url http://localhost:8010/v1 -model chimera-deepseek
   or use the model this gateway has:
-    -model %s`, c.BaseURL, c.Model, strings.Join(names, ", "), names[0])
+    -model %s`, c.BaseURL, c.Model, strings.Join(ids, ", "), ids[0])
 }
 
 // Refresh resets the provider conversation so a new task never inherits the

@@ -82,6 +82,19 @@ services:
       # fire small side requests (titles, tags) around each message — set 0
       # while testing if you see 429s.
       - RATE_LIMIT_SECONDS=${RATE_LIMIT_SECONDS:-2}
+      # State paths, explicit: the compiled defaults are <CHIMERA_HOME>, which
+      # inside the container is ~/.local/share/chimera - the container layer,
+      # so the ledger and the auth sessions below would vanish on rebuild.
+      # These point at the two mounts. environment beats a mounted /app/.env.
+      - AUTH_DIR=/app/auth_data
+      - LOG_DIR=/app/logs
+      - METER_DB=/app/logs/usage.db
+      # Transcripts: gateway reads SESSIONS_DIR, CLI reads CHIMERA_SESSIONS_DIR.
+      - SESSIONS_DIR=/app/logs/sessions
+      - CHIMERA_SESSIONS_DIR=/app/logs/sessions
+      # No Chromium here (TRANSPORT=webapi), but the config still creates the
+      # directory; pin it under /app so it is not looked for in $HOME.
+      - BROWSER_DATA_DIR=/app/browser_data
     volumes:
       # Exported sessions (auth_data/<provider>.json) — password-equivalent,
       # created on the host by `chimera auth login <provider>`.

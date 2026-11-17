@@ -12,6 +12,7 @@ import (
 
 	"github.com/chimera/chimera/internal/browser"
 	"github.com/chimera/chimera/internal/config"
+	"github.com/chimera/chimera/internal/logging"
 	"github.com/chimera/chimera/internal/providers/webapi"
 	_ "github.com/chimera/chimera/internal/providers/webapi/all"
 	"github.com/go-rod/rod"
@@ -218,6 +219,12 @@ func runAuth(args []string) {
 	if provider != "" {
 		cfg.Provider = provider
 	}
+
+	// auth drives browser.Manager, whose logger (and the package-level ones
+	// behind it) would otherwise stay on ./logs at debug: honour LOG_DIR,
+	// LOG_LEVEL and VERBOSE here too, since this command never reaches main's
+	// Configure.
+	logging.Configure(cfg.LogDir, cfg.LogLevel, cfg.Verbose)
 
 	switch args[0] {
 	case "login":

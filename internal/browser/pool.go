@@ -37,6 +37,8 @@ type poolEntry struct {
 	provider interface{}
 }
 
+// Pre-Configure defaults: logging.Configure (called once config.Load has
+// resolved LOG_DIR/LOG_LEVEL/VERBOSE) re-points this logger at the config.
 var poolLog = logging.New("pool", "./logs", "debug", true)
 
 // NewPool creates a Pool for the given config.

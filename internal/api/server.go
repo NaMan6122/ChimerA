@@ -30,6 +30,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// Pre-Configure defaults: logging.Configure (called once config.Load has
+// resolved LOG_DIR/LOG_LEVEL/VERBOSE) re-points this logger at the config.
 var log_ = logging.New("api", "./logs", "debug", true)
 
 // Server holds the HTTP server and dependencies.
