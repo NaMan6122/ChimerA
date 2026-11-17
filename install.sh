@@ -248,7 +248,11 @@ main() {
     ART="chimera_${VERNUM}_${goos}_${goarch}.tar.gz"
 
     TMP=$(mktemp -d)
-    trap 'rm -rf "$TMP"' EXIT
+    # TMP is local to main(); quote with a default so the EXIT trap (which
+    # fires after main returns and the local goes out of scope) never trips
+    # `set -u` on an unbound variable and turns a successful install into a
+    # non-zero exit.
+    trap 'rm -rf "${TMP:-}"' EXIT
 
     # --- fetch --------------------------------------------------------------
     if [ -n "$FROM_DIR" ]; then
