@@ -7,6 +7,84 @@ see [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
 ## [Unreleased]
 
+## [v0.5.0](https://github.com/NaMan6122/ChimerA/releases/tag/v0.5.0) — 2026-11-14
+
+One gateway, every subscription — browserless. `PROVIDER=all` now serves every
+provider with an exported session in a single process with no Chromium, and
+Docker gets a slim distroless image to match.
+
+### Added — routing
+
+- **Browserless multi-provider pool (`PROVIDER=all`)**: one gateway routes
+  every `chimera-*` model that has a valid `auth_data/<provider>.json` session —
+  no Chromium. `TRANSPORT=auto` prefers browserless and falls back to the DOM
+  pool only when no browserless session initializes (or when
+  `TRANSPORT_FALLBACK=dom` explicitly asks for a warm fallback). Per-provider
+  mutexes serialize turns per account (the vendors' own single-stream design)
+  while distinct providers run in parallel; one expired session takes down its
+  provider, not the gateway. The same pool drives `chimera --mcp`. (spec 027)
+- **`chimera auth login glm` and `chimera auth login kimi`**: GLM harvests the
+  `chatglm_refresh_token` cookie (its raw value is the refresh credential);
+  Kimi harvests the web-storage refresh token on `KIMI_WEB_URL` (`kimi.ai`,
+  matching the JWT `aud`). `auth all` / `auth check` cover every browserless
+  provider, and a test pins `authSpecs` to `webapi.Registered()` 1:1 so the
+  login surface and the transport registry can never drift apart.
+
+### Fixed — reliability
+
+- **UTF-8-safe emulated streaming**: SSE chunks are cut on rune boundaries, so
+  multi-byte characters (CJK, emoji, box-drawing) are never split into invalid
+  sequences across chunk edges.
+- **`GET /` reports the build version** (ldflags-stamped) instead of a
+  hardcoded `0.1.0`.
+- **`PROVIDER=glm` resolves its own URL** (was silently returning the ChatGPT
+  URL).
+- **Bounded conversation state**: browserless providers cap their
+  thread→conversation maps (512, oldest-entry eviction), so ephemeral
+  `X-Session-Id` values can no longer grow memory without bound.
+- **GLM/Kimi `NewChat()` clears thread state**, so `POST /v1/refresh` recovers
+  both the way it already recovers the other five.
+- Telemetry labels gemini/grok/glm correctly instead of bucketing them under
+  `model="unknown"`, and `chimera doctor` recognizes the v0.4 environment keys
+  (`GLM_*`, `KIMI_WEB_*`, `SESSIONS_DIR`, `*_DUMP`) — `.env.example` is pinned
+  by test so the doctor's key list and the real config cannot drift again.
+
+### Added — distribution
+
+- **`--target slim` Docker image**: distroless/static, non-root, ~33 MB,
+  browserless `TRANSPORT=webapi`, `auth_data` + `logs` volumes, provider
+  launcher symlinks, and a built-in `chimera -healthcheck` flag so the image
+  gets a zero-shell `HEALTHCHECK`. The browser image drops `pip` for apt
+  `python3-websockify`, and `docker-compose.yml` now mounts `./auth_data`, so
+  exported sessions and rotated refresh tokens survive in containers.
+- **`windows/arm64`** release zips alongside amd64.
+- **Deterministic archives** (`GZIP=-n`, `zip -X`) and a Homebrew formula that
+  no longer serves arm64 binaries to 32-bit ARM (`on_intel`/`on_arm` blocks).
+- **`install.sh`** resolves the latest release via the `releases/latest` 302
+  redirect — no more failing on GitHub's 60 req/hr unauthenticated API limit
+  behind shared NATs and CI runners — executes only once fully downloaded
+  (`main "$@"` guard against a truncated `curl | bash`), and gains `--quiet`.
+
+### Hardened — release pipeline
+
+- Tag releases are gated by a `verify` job (vet + `go test -race`).
+- Pre-release tags (`v0.5.0-rc.1`) publish with `--prerelease` and skip the
+  Homebrew tap: an RC can no longer hijack `releases/latest` or `brew upgrade`.
+- Release artifacts are smoke-tested in CI before publish (formula syntax
+  check, installer dry-run from `dist/`, version-stamp assertion).
+
+### Docs
+
+- README, ARCHITECTURE, PROVIDERS, API and CHAT-UI aligned with reality: eight
+  consumer surfaces (seven browserless), per-vendor wire and continuity tables,
+  all shipped endpoints (`/v1/refresh`, `/v1/usage`, `/metrics`), `call_<hex>`
+  tool IDs, and the full error table.
+- New **"Vendor UI / wire protocol drift"** issue template — structured failure
+  modes, telemetry evidence (`chimera_transport_fallback_total`,
+  `chimera_selector_fallback_total`, `chimera doctor --probe` output) and
+  mandatory redaction checkboxes. `glm` added to the bug template, and a
+  fresh-login hygiene checkbox rules out ordinary session expiry.
+
 ## [v0.4.0](https://github.com/NaMan6122/ChimerA/releases/tag/v0.4.0) — 2026-11-13
 
 Two more browserless transports (GLM and Kimi) and a one-word way to start
